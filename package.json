@@ -9,7 +9,10 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "lint": "eslint src --ext .ts",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "webhook:info": "tsx scripts/webhook-manager.ts info",
+    "webhook:delete": "tsx scripts/webhook-manager.ts delete",
+    "webhook:set": "tsx scripts/webhook-manager.ts set"
   },
   "keywords": ["telegram", "bot", "assistant"],
   "author": "",

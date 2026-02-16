@@ -109,40 +109,84 @@ export class Bot {
   }
 
   async start() {
-    // Start HTTP server for health checks
-    const port = config.webhook?.port || 3000;
-    await new Promise<void>((resolve) => {
-      this.httpServer?.listen(port, () => {
-        logger.info(`Health endpoint listening on port ${port}`);
-        resolve();
-      });
-    });
-
     if (config.webhook) {
       // Webhook mode (for production)
-      logger.info(`Starting bot in webhook mode on port ${config.webhook.port}`, {
-        domain: config.webhook.domain,
-      });
-      const webhookUrl = `https://${config.webhook.domain}/webhook`;
+      // Create custom HTTP server that handles both webhook and health endpoint
+      const { domain, port } = config.webhook;
+
+      logger.info(`Starting bot in webhook mode on port ${port}`, { domain });
+
+      const webhookUrl = `https://${domain}/webhook`;
       await this.bot.telegram.setWebhook(webhookUrl);
       logger.info(`Webhook set to: ${webhookUrl}`);
-      await this.bot.launch({
-        webhook: {
-          domain: config.webhook.domain,
-          port: config.webhook.port,
-          path: '/webhook'
+
+      // Get Telegraf's webhook callback
+      const webhookCallback = await this.bot.createWebhook({ domain, path: '/webhook' });
+
+      // Create HTTP server that handles both webhook and health
+      const webhookServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+        // Health check endpoint
+        if (req.url === '/health' && req.method === 'GET') {
+          try {
+            const health = await this.healthService.getHealthStatus();
+            res.writeHead(health.status === 'healthy' ? 200 : 503, {
+              'Content-Type': 'application/json',
+            });
+            res.end(JSON.stringify(health, null, 2));
+          } catch (error) {
+            logger.error('Health check failed', error);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ status: 'error', message: 'Health check failed' }));
+          }
+          return;
         }
+
+        // Webhook endpoint - delegate to Telegraf
+        if (req.url === '/webhook') {
+          webhookCallback(req, res);
+          return;
+        }
+
+        // 404 for other endpoints
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Not Found');
+      });
+
+      // Start the webhook server
+      await new Promise<void>((resolve) => {
+        webhookServer.listen(port, () => {
+          logger.info(`Webhook server listening on port ${port}`);
+          resolve();
+        });
+      });
+
+      // Store the webhook server so we can close it later
+      this.httpServer = webhookServer;
+
+      logger.info('✅ Bot is running!', {
+        mode: 'webhook',
+        healthEndpoint: `https://${domain}/health`,
+        webhookEndpoint: webhookUrl,
       });
     } else {
       // Polling mode (for development)
+      // Start standalone HTTP server for health checks
+      const port = 3000;
+      await new Promise<void>((resolve) => {
+        this.httpServer?.listen(port, () => {
+          logger.info(`Health endpoint listening on port ${port}`);
+          resolve();
+        });
+      });
+
       logger.info('Starting bot in polling mode...');
       await this.bot.launch();
-    }
 
-    logger.info('✅ Bot is running!', {
-      mode: config.webhook ? 'webhook' : 'polling',
-      healthEndpoint: `http://localhost:${port}/health`,
-    });
+      logger.info('✅ Bot is running!', {
+        mode: 'polling',
+        healthEndpoint: `http://localhost:${port}/health`,
+      });
+    }
   }
 
   async stop(signal: string) {
