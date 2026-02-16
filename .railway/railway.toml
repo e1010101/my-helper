@@ -1,0 +1,11 @@
+# Railway deployment configuration
+# This file is automatically detected by Railway
+
+[build]
+builder = "nixpacks"
+
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 10
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 10
