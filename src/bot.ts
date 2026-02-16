@@ -117,8 +117,29 @@ export class Bot {
       logger.info(`Starting bot in webhook mode on port ${port}`, { domain });
 
       const webhookUrl = `https://${domain}/webhook`;
-      await this.bot.telegram.setWebhook(webhookUrl);
-      logger.info(`Webhook set to: ${webhookUrl}`);
+
+      // Check if webhook is already set to avoid rate limits
+      try {
+        const webhookInfo = await this.bot.telegram.getWebhookInfo();
+        if (webhookInfo.url !== webhookUrl) {
+          logger.info(`Setting webhook to: ${webhookUrl}`);
+          await this.bot.telegram.setWebhook(webhookUrl);
+          logger.info(`Webhook set successfully`);
+        } else {
+          logger.info(`Webhook already set to: ${webhookUrl}`);
+        }
+      } catch (error: any) {
+        if (error.response?.error_code === 429) {
+          // Rate limited - wait and retry
+          const retryAfter = error.response?.parameters?.retry_after || 2;
+          logger.warn(`Rate limited. Waiting ${retryAfter} seconds before retry...`);
+          await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
+          await this.bot.telegram.setWebhook(webhookUrl);
+          logger.info(`Webhook set after retry`);
+        } else {
+          throw error;
+        }
+      }
 
       // Get Telegraf's webhook callback
       const webhookCallback = await this.bot.createWebhook({ domain, path: '/webhook' });
