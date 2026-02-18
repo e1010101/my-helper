@@ -12,7 +12,10 @@
     "type-check": "tsc --noEmit",
     "webhook:info": "tsx scripts/webhook-manager.ts info",
     "webhook:delete": "tsx scripts/webhook-manager.ts delete",
-    "webhook:set": "tsx scripts/webhook-manager.ts set"
+    "webhook:set": "tsx scripts/webhook-manager.ts set",
+    "codex:notify": "tsx scripts/codex-notify-bridge.ts",
+    "codex:notify:daemon": "tsx scripts/codex-notify-bridge.ts --daemon",
+    "codex:notify:install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-codex-notify.ps1"
   },
   "keywords": ["telegram", "bot", "assistant"],
   "author": "",

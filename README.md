@@ -136,6 +136,29 @@ npm run lint        # Run ESLint
 npm run type-check  # Type check without building
 ```
 
+## Codex Action Notifications (Windows)
+
+Use this if you want Codex action requests to appear as clickable desktop notifications.
+
+1. Install the local URI handler:
+   ```bash
+   npm run codex:notify:install
+   ```
+2. Start Codex through the notification bridge:
+   ```bash
+   npm run codex:notify -- "your prompt here"
+   ```
+3. Keep it always running (daemon mode):
+   ```bash
+   npm run codex:notify:daemon
+   ```
+
+When Codex needs a user decision, you will get a Windows toast notification with option buttons.
+Clicking the notification body (or a button) opens VS Code to your workspace.
+You will also get a completion notification when each Codex task finishes.
+
+Full setup details: [docs/codex-notifications.md](docs/codex-notifications.md)
+
 ## 🌐 Deployment
 
 ### Railway.app (Recommended)
@@ -217,4 +240,3 @@ For issues or questions:
 ---
 
 **Built with ❤️ for personal productivity**
-

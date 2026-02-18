@@ -31,3 +31,7 @@ coverage/
 
 # Misc
 .cache/
+
+# Local Codex generated artifacts
+.codex-schema/
+.codex-ts/
