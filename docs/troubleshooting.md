@@ -74,7 +74,7 @@ curl -X POST "https://api.telegram.org/botYOUR_TOKEN/deleteWebhook"
 ### Error: Connection Timeout
 
 **Symptoms:**
-- `/save` and `/get` commands fail
+- `/task` fails to save submitted tasks
 - `/status` shows database disconnected
 - Health endpoint shows unhealthy
 

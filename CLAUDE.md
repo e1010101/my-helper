@@ -56,7 +56,7 @@ src/
 
 **Command System** ([src/commands/index.ts](src/commands/index.ts))
 - Modular command registration
-- Built-in commands: `/start`, `/help`, `/ping`, `/save <key> <value>`, `/get <key>`
+- Built-in commands: `/start`, `/help`, `/ping`, `/task`, plus admin commands `/status`, `/stats`
 - Commands automatically log usage to database
 - Add new commands by creating handler functions and registering in `registerCommands()`
 

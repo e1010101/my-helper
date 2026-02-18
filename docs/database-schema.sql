@@ -24,10 +24,25 @@ CREATE TABLE IF NOT EXISTS command_history (
 -- Add comment to table
 COMMENT ON TABLE command_history IS 'Logs command usage history for analytics and debugging';
 
+-- Table: tasks
+-- Stores user-created to-do tasks
+CREATE TABLE IF NOT EXISTS tasks (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL,
+  completed BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+COMMENT ON TABLE tasks IS 'Stores user to-do tasks created from the /task command';
+
 -- Create indexes for better query performance
 CREATE INDEX IF NOT EXISTS idx_command_history_user_id ON command_history(user_id);
 CREATE INDEX IF NOT EXISTS idx_command_history_created_at ON command_history(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_command_history_command ON command_history(command);
+CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC);
 
 -- Optional: Enable Row Level Security (RLS) for better security
 -- Uncomment if you want to enable RLS (recommended for production)
