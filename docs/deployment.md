@@ -35,6 +35,7 @@ Railway offers the best balance of ease-of-use and cost-effectiveness for person
      TELEGRAM_BOT_TOKEN=your_bot_token
      SUPABASE_URL=your_supabase_url
      SUPABASE_ANON_KEY=your_supabase_key
+     SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
      NODE_ENV=production
      ```
 

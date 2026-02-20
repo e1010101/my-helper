@@ -162,6 +162,7 @@ Railway offers a generous free tier perfect for personal bots.
    - `TELEGRAM_BOT_TOKEN`
    - `SUPABASE_URL`
    - `SUPABASE_ANON_KEY`
+   - `SUPABASE_SERVICE_ROLE_KEY` (recommended for server-side writes, especially with RLS)
    - `NODE_ENV=production`
 6. Railway will automatically deploy your bot
 

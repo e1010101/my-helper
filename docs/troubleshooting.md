@@ -100,6 +100,37 @@ curl -X POST "https://api.telegram.org/botYOUR_TOKEN/deleteWebhook"
    - Run the SQL from `docs/database-schema.sql`
    - Check that tables were created successfully
 
+### Error: `PGRST205 Could not find the table 'public.tasks' in the schema cache`
+
+**Symptoms:**
+- `/task` fails on submit
+- Logs show `code: 'PGRST205'` and `public.tasks`
+
+**What this means:**
+- The bot is connected to Supabase, but the `tasks` table is missing (or not exposed in `public` schema) in that project.
+
+**Fix:**
+1. In Supabase SQL Editor, run:
+   ```sql
+   CREATE TABLE IF NOT EXISTS public.tasks (
+     id BIGSERIAL PRIMARY KEY,
+     user_id BIGINT NOT NULL,
+     name TEXT NOT NULL,
+     description TEXT NOT NULL,
+     completed BOOLEAN NOT NULL DEFAULT FALSE,
+     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+   );
+   CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON public.tasks(user_id);
+   CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON public.tasks(created_at DESC);
+   ```
+2. Verify it exists:
+   ```sql
+   SELECT table_schema, table_name
+   FROM information_schema.tables
+   WHERE table_schema = 'public' AND table_name = 'tasks';
+   ```
+3. If it still fails, ensure your bot is using the intended Supabase project URL and restart the bot.
+
 ---
 
 ## 📝 Environment Variable Issues
@@ -123,6 +154,7 @@ curl -X POST "https://api.telegram.org/botYOUR_TOKEN/deleteWebhook"
    TELEGRAM_BOT_TOKEN
    SUPABASE_URL
    SUPABASE_ANON_KEY
+   SUPABASE_SERVICE_ROLE_KEY (recommended for server-side writes when RLS is enabled)
    ADMIN_USER_ID
    ```
 

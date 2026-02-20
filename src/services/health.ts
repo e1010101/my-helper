@@ -11,6 +11,7 @@ export interface HealthStatus {
   database: {
     connected: boolean;
     latency?: number;
+    error?: string;
   };
   system: {
     memory: {
@@ -75,19 +76,33 @@ export class HealthService {
     };
   }
 
-  private async checkDatabaseHealth(): Promise<{ connected: boolean; latency?: number }> {
+  private async checkDatabaseHealth(): Promise<{ connected: boolean; latency?: number; error?: string }> {
     try {
       const { db } = await import('./database.js');
       const start = Date.now();
 
-      // Try a simple query
-      await db.getClient().from('user_data').select('user_id').limit(1);
+      // Validate all required tables exist and are queryable.
+      const checks = await Promise.all([
+        db.getClient().from('user_data').select('user_id').limit(1),
+        db.getClient().from('command_history').select('id').limit(1),
+        db.getClient().from('tasks').select('id').limit(1),
+      ]);
+
+      const failedCheck = checks.find(result => result.error);
+      if (failedCheck?.error) {
+        throw failedCheck.error;
+      }
 
       const latency = Date.now() - start;
       return { connected: true, latency };
     } catch (error) {
       console.error('Database health check failed:', error);
-      return { connected: false };
+      const message = error instanceof Error
+        ? error.message
+        : (typeof error === 'object' && error && 'message' in error
+          ? String((error as { message: unknown }).message)
+          : 'Unknown database error');
+      return { connected: false, error: message };
     }
   }
 

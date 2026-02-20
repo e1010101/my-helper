@@ -8,7 +8,8 @@ interface Config {
   };
   supabase: {
     url: string;
-    anonKey: string;
+    anonKey?: string;
+    serviceRoleKey?: string;
   };
   webhook?: {
     domain: string;
@@ -25,13 +26,32 @@ function getEnvVar(key: string): string {
   return value;
 }
 
+function getOptionalEnvVar(key: string): string | undefined {
+  const value = process.env[key];
+  return value && value.trim() ? value : undefined;
+}
+
+function getSupabaseKeys(): { anonKey?: string; serviceRoleKey?: string } {
+  const anonKey = getOptionalEnvVar('SUPABASE_ANON_KEY');
+  const serviceRoleKey = getOptionalEnvVar('SUPABASE_SERVICE_ROLE_KEY');
+
+  if (!anonKey && !serviceRoleKey) {
+    throw new Error('Missing Supabase credentials: set SUPABASE_SERVICE_ROLE_KEY or SUPABASE_ANON_KEY');
+  }
+
+  return { anonKey, serviceRoleKey };
+}
+
+const supabaseKeys = getSupabaseKeys();
+
 export const config: Config = {
   telegram: {
     token: getEnvVar('TELEGRAM_BOT_TOKEN'),
   },
   supabase: {
     url: getEnvVar('SUPABASE_URL'),
-    anonKey: getEnvVar('SUPABASE_ANON_KEY'),
+    anonKey: supabaseKeys.anonKey,
+    serviceRoleKey: supabaseKeys.serviceRoleKey,
   },
   webhook: process.env.WEBHOOK_DOMAIN
     ? {

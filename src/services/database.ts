@@ -5,7 +5,12 @@ export class DatabaseService {
   private client: SupabaseClient;
 
   constructor() {
-    this.client = createClient(config.supabase.url, config.supabase.anonKey);
+    // Prefer service role key for server-side operations to avoid RLS write failures.
+    const supabaseKey = config.supabase.serviceRoleKey || config.supabase.anonKey;
+    if (!supabaseKey) {
+      throw new Error('Supabase key is not configured');
+    }
+    this.client = createClient(config.supabase.url, supabaseKey);
   }
 
   getClient(): SupabaseClient {
