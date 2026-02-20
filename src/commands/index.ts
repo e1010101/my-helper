@@ -1,4 +1,4 @@
-import { Telegraf, Context } from 'telegraf';
+import { Telegraf, Context, Markup } from 'telegraf';
 
 export interface BotCommand {
   command: string;
@@ -9,6 +9,17 @@ export interface BotCommand {
 // Admin user IDs - add your Telegram user ID here
 // To find your user ID, message the bot and check the logs, or use a bot like @userinfobot
 const ADMIN_USER_IDS = [parseInt(process.env.ADMIN_USER_ID || '0')];
+type TaskField = 'name' | 'description';
+
+interface TaskDraft {
+  chatId: number;
+  messageId?: number;
+  name?: string;
+  description?: string;
+  awaiting?: TaskField;
+}
+
+const taskDrafts = new Map<number, TaskDraft>();
 
 function isAdmin(userId: number | undefined): boolean {
   return userId !== undefined && ADMIN_USER_IDS.includes(userId);
@@ -19,8 +30,12 @@ export function registerCommands(bot: Telegraf): void {
   bot.command('start', startCommand);
   bot.command('help', helpCommand);
   bot.command('ping', pingCommand);
-  bot.command('save', saveCommand);
-  bot.command('get', getCommand);
+  bot.command('task', taskCommand);
+  bot.action(/^task:(set_name|set_description|submit)$/, taskActionCommand);
+  bot.on('text', async (ctx, next) => {
+    await taskTextInputHandler(ctx);
+    await next();
+  });
   bot.command('status', statusCommand);
   bot.command('stats', statsCommand);
 }
@@ -43,8 +58,7 @@ async function helpCommand(ctx: Context) {
 /start - Start the bot and see welcome message
 /help - Show this help message
 /ping - Check if the bot is responsive
-/save <key> <value> - Save data to your personal storage
-/get <key> - Retrieve data from your storage
+/task - Create a new to-do task
 `;
 
   if (isAdminUser) {
@@ -68,69 +82,148 @@ async function pingCommand(ctx: Context) {
   });
 }
 
-async function saveCommand(ctx: Context) {
-  const text = ctx.message && 'text' in ctx.message ? ctx.message.text : '';
-  const parts = text.split(' ').slice(1); // Remove /save
+function getTaskFormKeyboard() {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback('Name', 'task:set_name'),
+      Markup.button.callback('Description', 'task:set_description'),
+    ],
+    [Markup.button.callback('Submit', 'task:submit')],
+  ]);
+}
 
-  if (parts.length < 2) {
-    await ctx.reply('Usage: /save <key> <value>\nExample: /save myNote Remember to buy milk');
-    return;
+function getTaskFormText(draft: TaskDraft): string {
+  const name = draft.name?.trim() || '(not set)';
+  const description = draft.description?.trim() || '(not set)';
+  const awaitingText = draft.awaiting
+    ? `\n\nWaiting for ${draft.awaiting} input...`
+    : '\n\nTap Name or Description to edit, then tap Submit.';
+
+  return `📝 New Task Form\n\nName: ${name}\nDescription: ${description}${awaitingText}`;
+}
+
+async function renderTaskForm(ctx: Context, userId: number, draft: TaskDraft): Promise<void> {
+  const text = getTaskFormText(draft);
+  const keyboard = getTaskFormKeyboard().reply_markup;
+
+  if (draft.messageId) {
+    try {
+      await ctx.telegram.editMessageText(draft.chatId, draft.messageId, undefined, text, {
+        reply_markup: keyboard,
+      });
+      return;
+    } catch (error) {
+      console.error('Error editing task form message:', error);
+    }
   }
 
-  const key = parts[0];
-  const value = parts.slice(1).join(' ');
+  const sent = await ctx.reply(text, { reply_markup: keyboard });
+  draft.chatId = sent.chat.id;
+  draft.messageId = sent.message_id;
+  taskDrafts.set(userId, draft);
+}
 
-  // Import database service dynamically to avoid circular dependencies
-  const { db } = await import('../services/database.js');
+async function taskCommand(ctx: Context) {
   const userId = ctx.from?.id;
+  const chatId = ctx.chat?.id;
 
-  if (!userId) {
+  if (!userId || !chatId) {
     await ctx.reply('❌ Could not identify user');
     return;
   }
 
+  const draft: TaskDraft = { chatId };
+  taskDrafts.set(userId, draft);
+  await renderTaskForm(ctx, userId, draft);
+}
+
+async function taskActionCommand(ctx: Context) {
+  const userId = ctx.from?.id;
+  const callbackData = ctx.callbackQuery && 'data' in ctx.callbackQuery ? ctx.callbackQuery.data : '';
+  const callbackMessage = ctx.callbackQuery && 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : undefined;
+  const callbackChatId = callbackMessage?.chat?.id;
+  const callbackMessageId = callbackMessage?.message_id;
+
+  if (!userId || !callbackData || !callbackChatId) {
+    await ctx.answerCbQuery();
+    return;
+  }
+
+  const existingDraft = taskDrafts.get(userId);
+  const draft: TaskDraft = existingDraft || { chatId: callbackChatId };
+  draft.chatId = callbackChatId;
+  draft.messageId = callbackMessageId;
+  taskDrafts.set(userId, draft);
+
+  if (callbackData === 'task:set_name' || callbackData === 'task:set_description') {
+    draft.awaiting = callbackData === 'task:set_name' ? 'name' : 'description';
+    taskDrafts.set(userId, draft);
+    await ctx.answerCbQuery(`Send the task ${draft.awaiting} as your next message.`);
+    await renderTaskForm(ctx, userId, draft);
+    return;
+  }
+
+  if (callbackData !== 'task:submit') {
+    await ctx.answerCbQuery();
+    return;
+  }
+
+  if (!draft.name?.trim() || !draft.description?.trim()) {
+    await ctx.answerCbQuery('Please fill in Name and Description before submitting.', {
+      show_alert: true,
+    });
+    return;
+  }
+
   try {
-    const userData = await db.getUserData(userId) || { data: {} };
-    const updatedData = { ...userData.data, [key]: value };
-    await db.saveUserData(userId, updatedData);
-    await ctx.reply(`✅ Saved "${key}" successfully!`);
+    const { db } = await import('../services/database.js');
+    await db.createTask(userId, draft.name.trim(), draft.description.trim());
+
+    const confirmation = `✅ Task saved!\n\nName: ${draft.name.trim()}\nDescription: ${draft.description.trim()}`;
+
+    try {
+      if (draft.messageId) {
+        await ctx.telegram.editMessageText(draft.chatId, draft.messageId, undefined, confirmation);
+      } else {
+        await ctx.reply(confirmation);
+      }
+    } catch (error) {
+      console.error('Error updating task confirmation message:', error);
+      await ctx.reply(confirmation);
+    }
+
+    taskDrafts.delete(userId);
+    await ctx.answerCbQuery('Task saved');
   } catch (error) {
-    console.error('Save command error:', error);
-    await ctx.reply('❌ Failed to save data. Please try again later.');
+    console.error('Task submit error:', error);
+    await ctx.answerCbQuery('Failed to save task', { show_alert: true });
+    await ctx.reply('❌ Failed to save task. Please try again later.');
   }
 }
 
-async function getCommand(ctx: Context) {
-  const text = ctx.message && 'text' in ctx.message ? ctx.message.text : '';
-  const parts = text.split(' ').slice(1);
-
-  if (parts.length !== 1) {
-    await ctx.reply('Usage: /get <key>\nExample: /get myNote');
-    return;
-  }
-
-  const key = parts[0];
-  const { db } = await import('../services/database.js');
+async function taskTextInputHandler(ctx: Context) {
   const userId = ctx.from?.id;
+  const text = ctx.message && 'text' in ctx.message ? ctx.message.text.trim() : '';
 
-  if (!userId) {
-    await ctx.reply('❌ Could not identify user');
+  if (!userId || !text || text.startsWith('/')) {
     return;
   }
 
-  try {
-    const userData = await db.getUserData(userId);
-
-    if (!userData || !userData.data || !(key in userData.data)) {
-      await ctx.reply(`❌ No data found for key "${key}"`);
-      return;
-    }
-
-    await ctx.reply(`📝 *${key}:*\n${userData.data[key]}`, { parse_mode: 'Markdown' });
-  } catch (error) {
-    console.error('Get command error:', error);
-    await ctx.reply('❌ Failed to retrieve data. Please try again later.');
+  const draft = taskDrafts.get(userId);
+  if (!draft || !draft.awaiting) {
+    return;
   }
+
+  const updatedField: TaskField = draft.awaiting;
+  if (updatedField === 'name') {
+    draft.name = text;
+  } else {
+    draft.description = text;
+  }
+
+  draft.awaiting = undefined;
+  taskDrafts.set(userId, draft);
+  await renderTaskForm(ctx, userId, draft);
 }
 
 async function statusCommand(ctx: Context) {

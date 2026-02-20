@@ -50,6 +50,17 @@ export class DatabaseService {
       console.error('Error logging command:', error);
     }
   }
+
+  async createTask(userId: number, name: string, description: string) {
+    const { error } = await this.client
+      .from('tasks')
+      .insert({ user_id: userId, name, description });
+
+    if (error) {
+      console.error('Error creating task:', error);
+      throw error;
+    }
+  }
 }
 
 export const db = new DatabaseService();

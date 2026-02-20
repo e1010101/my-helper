@@ -137,9 +137,9 @@ Overall:
 
 Top Commands (last 100):
 1. /ping: 25×
-2. /save: 18×
+2. /task: 18×
 3. /help: 15×
-4. /get: 12×
+4. /status: 12×
 5. /start: 8×
 ```
 

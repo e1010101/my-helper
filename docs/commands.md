@@ -48,49 +48,25 @@ Bot: 🏓 Pong!
 
 ---
 
-### `/save`
-**Description:** Save data to your personal storage
+### `/task`
+**Description:** Create a new to-do task with an interactive form
 
-**Usage:** `/save <key> <value>`
+**Usage:** `/task`
 
-**Arguments:**
-- `key` - Identifier for your data (one word)
-- `value` - The data to save (can be multiple words)
+**Flow:**
+1. Bot shows a form with `Name`, `Description`, and `Submit` buttons
+2. Tap `Name`, send the name text
+3. Tap `Description`, send the description text
+4. Tap `Submit` to persist the task to the database
 
-**Examples:**
+**Example:**
 ```
-User: /save groceries milk eggs bread cheese
-Bot: ✅ Saved "groceries" successfully!
-
-User: /save birthday 2024-05-15
-Bot: ✅ Saved "birthday" successfully!
-
-User: /save note Remember to call mom
-Bot: ✅ Saved "note" successfully!
-```
-
----
-
-### `/get`
-**Description:** Retrieve previously saved data
-
-**Usage:** `/get <key>`
-
-**Arguments:**
-- `key` - The identifier you used when saving
-
-**Examples:**
-```
-User: /get groceries
-Bot: 📝 groceries:
-     milk eggs bread cheese
-
-User: /get birthday
-Bot: 📝 birthday:
-     2024-05-15
-
-User: /get nonexistent
-Bot: ❌ No data found for key "nonexistent"
+User: /task
+Bot: 📝 New Task Form
+     Name: (not set)
+     Description: (not set)
+     [Name] [Description]
+     [Submit]
 ```
 
 ---

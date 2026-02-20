@@ -5,7 +5,7 @@ A powerful, extensible Telegram bot for personal assistance, built with TypeScri
 ## ✨ Features
 
 - 🔐 **Secure** - User-specific data storage with Supabase
-- 📝 **Persistent Storage** - Save and retrieve personal notes and data
+- 📝 **Task Capture** - Create and persist to-do tasks
 - 🚀 **Fast** - Built with Telegraf, one of the fastest Telegram bot frameworks
 - 🔧 **Extensible** - Easy-to-add command system
 - 📊 **Analytics** - Command usage tracking and statistics
@@ -78,12 +78,24 @@ npm start
 - `/start` - Welcome message and introduction
 - `/help` - List all available commands
 - `/ping` - Check bot responsiveness
-- `/save <key> <value>` - Save data to your personal storage
-- `/get <key>` - Retrieve saved data
+- `/task` - Open task form (Name + Description + Submit)
 
 **Admin Commands:**
 - `/status` - Check bot health, uptime, and system status
 - `/stats` - View usage statistics and top commands
+
+### `/task` Usage
+
+1. Send `/task`
+2. Tap `Name`, then send the task name as your next message
+3. Tap `Description`, then send the description as your next message
+4. Tap `Submit` to save the task
+
+Expected behavior:
+- The bot keeps one in-progress task draft per user while filling the form.
+- `Submit` is blocked until both `Name` and `Description` are provided.
+- On success, the bot confirms with `✅ Task saved!` and persists the task in the `tasks` table.
+- If saving fails, the bot responds with an error and keeps the draft so you can retry.
 
 ## 🛠️ Development
 
@@ -136,29 +148,6 @@ npm run lint        # Run ESLint
 npm run type-check  # Type check without building
 ```
 
-## Codex Action Notifications (Windows)
-
-Use this if you want Codex action requests to appear as clickable desktop notifications.
-
-1. Install the local URI handler:
-   ```bash
-   npm run codex:notify:install
-   ```
-2. Start Codex through the notification bridge:
-   ```bash
-   npm run codex:notify -- "your prompt here"
-   ```
-3. Keep it always running (daemon mode):
-   ```bash
-   npm run codex:notify:daemon
-   ```
-
-When Codex needs a user decision, you will get a Windows toast notification with option buttons.
-Clicking the notification body (or a button) opens VS Code to your workspace.
-You will also get a completion notification when each Codex task finishes.
-
-Full setup details: [docs/codex-notifications.md](docs/codex-notifications.md)
-
 ## 🌐 Deployment
 
 ### Railway.app (Recommended)
@@ -208,10 +197,11 @@ The bot includes comprehensive monitoring features:
 
 ## 💾 Database Schema
 
-The bot requires two Supabase tables:
+The bot requires three Supabase tables:
 
 - `user_data` - Stores user-specific key-value data
 - `command_history` - Logs command usage for analytics
+- `tasks` - Stores to-do tasks created from `/task`
 
 Run the SQL from `docs/database-schema.sql` in your Supabase SQL Editor to create these tables.
 
@@ -220,7 +210,7 @@ Run the SQL from `docs/database-schema.sql` in your Supabase SQL Editor to creat
 - Never commit your `.env` file
 - Keep your bot token and Supabase keys secret
 - Use Supabase Row Level Security (RLS) for production
-- The bot only stores data you explicitly save with `/save`
+- The bot only stores data you explicitly submit (for example via `/task`)
 
 ## 🤝 Contributing
 
