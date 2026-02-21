@@ -42,6 +42,7 @@ export function registerCommands(bot: Telegraf): void {
   bot.command('help', helpCommand);
   bot.command('ping', pingCommand);
   bot.command('task', taskCommand);
+  bot.command('tasks', tasksCommand);
   bot.action(/^task:(set_name|set_description|submit)$/, taskActionCommand);
   bot.on('text', async (ctx, next) => {
     await taskTextInputHandler(ctx);
@@ -70,6 +71,7 @@ async function helpCommand(ctx: Context) {
 /help - Show this help message
 /ping - Check if the bot is responsive
 /task - Create a new to-do task
+/tasks - List your saved tasks
 `;
 
   if (isAdminUser) {
@@ -146,6 +148,45 @@ async function taskCommand(ctx: Context) {
   const draft: TaskDraft = { chatId };
   taskDrafts.set(userId, draft);
   await renderTaskForm(ctx, userId, draft);
+}
+
+async function tasksCommand(ctx: Context) {
+  const userId = ctx.from?.id;
+
+  if (!userId) {
+    await ctx.reply('❌ Could not identify user');
+    return;
+  }
+
+  try {
+    const { db } = await import('../services/database.js');
+    const tasks = await db.getTasksByUser(userId, 20);
+
+    if (tasks.length === 0) {
+      await ctx.reply('📝 You have no tasks yet. Use /task to create one.');
+      return;
+    }
+
+    const lines = tasks.map((task, index) => {
+      const status = task.completed ? '✅' : '⬜';
+      const createdAt = task.created_at
+        ? new Date(task.created_at).toLocaleDateString()
+        : 'unknown date';
+
+      return `${index + 1}. ${status} ${task.name}\n   ${task.description}\n   Created: ${createdAt}`;
+    });
+
+    await ctx.reply(`📝 Your Tasks (${tasks.length})\n\n${lines.join('\n\n')}`);
+  } catch (error) {
+    console.error('Tasks command error:', error);
+    if (isMissingTasksTableError(error)) {
+      await ctx.reply(
+        '❌ Cannot list tasks: database table "tasks" is missing. Run docs/database-schema.sql in Supabase SQL Editor.'
+      );
+      return;
+    }
+    await ctx.reply('❌ Failed to fetch tasks. Please try again later.');
+  }
 }
 
 async function taskActionCommand(ctx: Context) {

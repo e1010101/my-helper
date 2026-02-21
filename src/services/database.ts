@@ -5,12 +5,7 @@ export class DatabaseService {
   private client: SupabaseClient;
 
   constructor() {
-    // Prefer service role key for server-side operations to avoid RLS write failures.
-    const supabaseKey = config.supabase.serviceRoleKey || config.supabase.anonKey;
-    if (!supabaseKey) {
-      throw new Error('Supabase key is not configured');
-    }
-    this.client = createClient(config.supabase.url, supabaseKey);
+    this.client = createClient(config.supabase.url, config.supabase.anonKey);
   }
 
   getClient(): SupabaseClient {
@@ -65,6 +60,22 @@ export class DatabaseService {
       console.error('Error creating task:', error);
       throw error;
     }
+  }
+
+  async getTasksByUser(userId: number, limit = 20) {
+    const { data, error } = await this.client
+      .from('tasks')
+      .select('id, name, description, completed, created_at')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (error) {
+      console.error('Error fetching tasks:', error);
+      throw error;
+    }
+
+    return data || [];
   }
 }
 

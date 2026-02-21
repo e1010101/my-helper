@@ -154,7 +154,6 @@ curl -X POST "https://api.telegram.org/botYOUR_TOKEN/deleteWebhook"
    TELEGRAM_BOT_TOKEN
    SUPABASE_URL
    SUPABASE_ANON_KEY
-   SUPABASE_SERVICE_ROLE_KEY (recommended for server-side writes when RLS is enabled)
    ADMIN_USER_ID
    ```
 

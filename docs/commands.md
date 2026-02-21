@@ -71,6 +71,27 @@ Bot: 📝 New Task Form
 
 ---
 
+### `/tasks`
+**Description:** List your saved tasks
+
+**Usage:** `/tasks`
+
+**Behavior:**
+1. Fetches your tasks from the `tasks` table
+2. Shows up to 20 tasks, newest first
+3. Displays status, name, description, and created date
+
+**Example:**
+```
+User: /tasks
+Bot: 📝 Your Tasks (2)
+     1. ⬜ Buy groceries
+        Milk, eggs, bread
+        Created: 2/21/2026
+```
+
+---
+
 ## 🔧 Adding New Commands
 
 ### Basic Command
