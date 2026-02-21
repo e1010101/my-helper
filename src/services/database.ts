@@ -61,6 +61,22 @@ export class DatabaseService {
       throw error;
     }
   }
+
+  async getTasksByUser(userId: number, limit = 20) {
+    const { data, error } = await this.client
+      .from('tasks')
+      .select('id, name, description, completed, created_at')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (error) {
+      console.error('Error fetching tasks:', error);
+      throw error;
+    }
+
+    return data || [];
+  }
 }
 
 export const db = new DatabaseService();

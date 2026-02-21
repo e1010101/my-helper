@@ -21,6 +21,17 @@ interface TaskDraft {
 
 const taskDrafts = new Map<number, TaskDraft>();
 
+function isMissingTasksTableError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const maybeCode = 'code' in error ? String((error as { code?: unknown }).code || '') : '';
+  const maybeMessage = 'message' in error ? String((error as { message?: unknown }).message || '') : '';
+
+  return maybeCode === 'PGRST205' && maybeMessage.includes('public.tasks');
+}
+
 function isAdmin(userId: number | undefined): boolean {
   return userId !== undefined && ADMIN_USER_IDS.includes(userId);
 }
@@ -31,6 +42,7 @@ export function registerCommands(bot: Telegraf): void {
   bot.command('help', helpCommand);
   bot.command('ping', pingCommand);
   bot.command('task', taskCommand);
+  bot.command('tasks', tasksCommand);
   bot.action(/^task:(set_name|set_description|submit)$/, taskActionCommand);
   bot.on('text', async (ctx, next) => {
     await taskTextInputHandler(ctx);
@@ -59,6 +71,7 @@ async function helpCommand(ctx: Context) {
 /help - Show this help message
 /ping - Check if the bot is responsive
 /task - Create a new to-do task
+/tasks - List your saved tasks
 `;
 
   if (isAdminUser) {
@@ -137,6 +150,45 @@ async function taskCommand(ctx: Context) {
   await renderTaskForm(ctx, userId, draft);
 }
 
+async function tasksCommand(ctx: Context) {
+  const userId = ctx.from?.id;
+
+  if (!userId) {
+    await ctx.reply('❌ Could not identify user');
+    return;
+  }
+
+  try {
+    const { db } = await import('../services/database.js');
+    const tasks = await db.getTasksByUser(userId, 20);
+
+    if (tasks.length === 0) {
+      await ctx.reply('📝 You have no tasks yet. Use /task to create one.');
+      return;
+    }
+
+    const lines = tasks.map((task, index) => {
+      const status = task.completed ? '✅' : '⬜';
+      const createdAt = task.created_at
+        ? new Date(task.created_at).toLocaleDateString()
+        : 'unknown date';
+
+      return `${index + 1}. ${status} ${task.name}\n   ${task.description}\n   Created: ${createdAt}`;
+    });
+
+    await ctx.reply(`📝 Your Tasks (${tasks.length})\n\n${lines.join('\n\n')}`);
+  } catch (error) {
+    console.error('Tasks command error:', error);
+    if (isMissingTasksTableError(error)) {
+      await ctx.reply(
+        '❌ Cannot list tasks: database table "tasks" is missing. Run docs/database-schema.sql in Supabase SQL Editor.'
+      );
+      return;
+    }
+    await ctx.reply('❌ Failed to fetch tasks. Please try again later.');
+  }
+}
+
 async function taskActionCommand(ctx: Context) {
   const userId = ctx.from?.id;
   const callbackData = ctx.callbackQuery && 'data' in ctx.callbackQuery ? ctx.callbackQuery.data : '';
@@ -193,10 +245,28 @@ async function taskActionCommand(ctx: Context) {
     }
 
     taskDrafts.delete(userId);
-    await ctx.answerCbQuery('Task saved');
+    try {
+      await ctx.answerCbQuery('Task saved');
+    } catch (callbackError) {
+      console.warn('Task saved but failed to answer callback query:', callbackError);
+    }
   } catch (error) {
     console.error('Task submit error:', error);
-    await ctx.answerCbQuery('Failed to save task', { show_alert: true });
+    const missingTasksTable = isMissingTasksTableError(error);
+    try {
+      await ctx.answerCbQuery(
+        missingTasksTable ? 'Tasks table is missing in database' : 'Failed to save task',
+        { show_alert: true }
+      );
+    } catch (callbackError) {
+      console.warn('Failed to answer callback query after task submit error:', callbackError);
+    }
+    if (missingTasksTable) {
+      await ctx.reply(
+        '❌ Failed to save task: database table "tasks" is missing. Run docs/database-schema.sql in Supabase SQL Editor.'
+      );
+      return;
+    }
     await ctx.reply('❌ Failed to save task. Please try again later.');
   }
 }
@@ -257,7 +327,7 @@ ${statusEmoji} *Bot Status*
 
 *Components:*
 ${botEmoji} Bot: ${health.bot.connected ? 'Connected' : 'Disconnected'} (${health.bot.mode})
-${dbEmoji} Database: ${health.database.connected ? 'Connected' : 'Disconnected'}${health.database.latency ? ` (${health.database.latency}ms)` : ''}
+${dbEmoji} Database: ${health.database.connected ? 'Connected' : 'Disconnected'}${health.database.latency ? ` (${health.database.latency}ms)` : ''}${health.database.error ? `\n⚠️ DB Error: ${health.database.error}` : ''}
 
 *System:*
 💾 Memory: ${health.system.memory.used}MB / ${health.system.memory.total}MB (${health.system.memory.percentage}%)

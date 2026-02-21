@@ -79,6 +79,7 @@ npm start
 - `/help` - List all available commands
 - `/ping` - Check bot responsiveness
 - `/task` - Open task form (Name + Description + Submit)
+- `/tasks` - List your saved tasks
 
 **Admin Commands:**
 - `/status` - Check bot health, uptime, and system status
@@ -96,6 +97,11 @@ Expected behavior:
 - `Submit` is blocked until both `Name` and `Description` are provided.
 - On success, the bot confirms with `✅ Task saved!` and persists the task in the `tasks` table.
 - If saving fails, the bot responds with an error and keeps the draft so you can retry.
+
+### `/tasks` Usage
+
+1. Send `/tasks`
+2. Bot returns your most recent saved tasks (up to 20), newest first
 
 ## 🛠️ Development
 
