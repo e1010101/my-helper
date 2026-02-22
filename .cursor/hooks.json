@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "hooks": {
+    "afterAgentResponse": [
+      {
+        "command": "node .cursor/scripts/notify-on-agent-response.mjs"
+      }
+    ]
+  }
+}
