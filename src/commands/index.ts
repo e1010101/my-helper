@@ -44,6 +44,7 @@ export function registerCommands(bot: Telegraf): void {
   bot.command('task', taskCommand);
   bot.command('tasks', tasksCommand);
   bot.action(/^task:(set_name|set_description|submit)$/, taskActionCommand);
+  bot.action(/^task:toggle:(\d+)$/, toggleTaskActionCommand);
   bot.on('text', async (ctx, next) => {
     await taskTextInputHandler(ctx);
     await next();
@@ -176,7 +177,19 @@ async function tasksCommand(ctx: Context) {
       return `${index + 1}. ${status} ${task.name}\n   ${task.description}\n   Created: ${createdAt}`;
     });
 
-    await ctx.reply(`📝 Your Tasks (${tasks.length})\n\n${lines.join('\n\n')}`);
+    const buttons = tasks.map((task, index) =>
+      Markup.button.callback(`[${index + 1}]`, `task:toggle:${task.id}`)
+    );
+
+    const keyboardRows = [];
+    for (let i = 0; i < buttons.length; i += 5) {
+      keyboardRows.push(buttons.slice(i, i + 5));
+    }
+    const keyboard = Markup.inlineKeyboard(keyboardRows);
+
+    await ctx.reply(`📝 Your Tasks (${tasks.length})\n\n${lines.join('\n\n')}`, {
+      reply_markup: keyboard.reply_markup
+    });
   } catch (error) {
     console.error('Tasks command error:', error);
     if (isMissingTasksTableError(error)) {
@@ -268,6 +281,73 @@ async function taskActionCommand(ctx: Context) {
       return;
     }
     await ctx.reply('❌ Failed to save task. Please try again later.');
+  }
+}
+
+async function toggleTaskActionCommand(ctx: Context) {
+  const userId = ctx.from?.id;
+  const match = (ctx as any).match as RegExpExecArray | undefined;
+  const taskIdRaw = match?.[1];
+
+  if (!userId || !taskIdRaw) {
+    await ctx.answerCbQuery();
+    return;
+  }
+
+  const taskId = parseInt(taskIdRaw, 10);
+  if (isNaN(taskId)) {
+    await ctx.answerCbQuery('Invalid task ID', { show_alert: true });
+    return;
+  }
+
+  try {
+    const { db } = await import('../services/database.js');
+
+    const task = await db.getTask(taskId, userId);
+    if (!task) {
+      await ctx.answerCbQuery('Task not found', { show_alert: true });
+      return;
+    }
+
+    const newStatus = !task.completed;
+    await db.updateTaskStatus(taskId, userId, newStatus);
+
+    // Fetch refreshed tasks list
+    const tasks = await db.getTasksByUser(userId, 20);
+
+    const lines = tasks.map((task, index) => {
+      const status = task.completed ? '✅' : '⬜';
+      const createdAt = task.created_at
+        ? new Date(task.created_at).toLocaleDateString()
+        : 'unknown date';
+
+      return `${index + 1}. ${status} ${task.name}\n   ${task.description}\n   Created: ${createdAt}`;
+    });
+
+    const buttons = tasks.map((task, index) =>
+      Markup.button.callback(`[${index + 1}]`, `task:toggle:${task.id}`)
+    );
+
+    const keyboardRows = [];
+    for (let i = 0; i < buttons.length; i += 5) {
+      keyboardRows.push(buttons.slice(i, i + 5));
+    }
+    const keyboard = Markup.inlineKeyboard(keyboardRows);
+
+    if (ctx.callbackQuery?.message && 'chat' in ctx.callbackQuery.message) {
+      await ctx.telegram.editMessageText(
+        ctx.callbackQuery.message.chat.id,
+        ctx.callbackQuery.message.message_id,
+        undefined,
+        `📝 Your Tasks (${tasks.length})\n\n${lines.join('\n\n')}`,
+        { reply_markup: keyboard.reply_markup }
+      );
+    }
+
+    await ctx.answerCbQuery(`Task marked as ${newStatus ? 'completed' : 'uncompleted'}`);
+  } catch (error) {
+    console.error('Toggle task error:', error);
+    await ctx.answerCbQuery('Failed to update task', { show_alert: true });
   }
 }
 

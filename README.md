@@ -102,6 +102,7 @@ Expected behavior:
 
 1. Send `/tasks`
 2. Bot returns your most recent saved tasks (up to 20), newest first
+3. Use the inline keyboard buttons (e.g., `[1]`, `[2]`) below the message to toggle tasks as completed (✅) or uncompleted (⬜)
 
 ## 🛠️ Development
 

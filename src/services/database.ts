@@ -62,6 +62,35 @@ export class DatabaseService {
     }
   }
 
+  async getTask(taskId: number, userId: number) {
+    const { data, error } = await this.client
+      .from('tasks')
+      .select('*')
+      .eq('id', taskId)
+      .eq('user_id', userId)
+      .single();
+
+    if (error) {
+      console.error('Error fetching task:', error);
+      throw error;
+    }
+
+    return data;
+  }
+
+  async updateTaskStatus(taskId: number, userId: number, completed: boolean) {
+    const { error } = await this.client
+      .from('tasks')
+      .update({ completed })
+      .eq('id', taskId)
+      .eq('user_id', userId);
+
+    if (error) {
+      console.error('Error updating task status:', error);
+      throw error;
+    }
+  }
+
   async getTasksByUser(userId: number, limit = 20) {
     const { data, error } = await this.client
       .from('tasks')
