@@ -73,7 +73,7 @@ async function helpCommand(ctx: Context) {
 /help - Show this help message
 /ping - Check if the bot is responsive
 /task - Create a new to-do task (or use flags)
-  \`-create\` : Create a task (default)
+  \`-create\` : Create a task
   \`-read <id>\` : View task details
   \`-update <id>\` : Edit a task
   \`-delete <id>\` : Delete a task
@@ -154,7 +154,13 @@ async function taskCommand(ctx: Context) {
 
   // Parse command arguments: /task -(flag) (id)
   const args = text.split(' ').slice(1);
-  const flag = args[0]?.toLowerCase();
+  let flag = args[0]?.toLowerCase();
+
+  if (!flag) {
+    await ctx.reply('❌ Please specify an action. Usage:\n`/task -create`\n`/task -read <id>`\n`/task -update <id>`\n`/task -delete <id>`', { parse_mode: 'Markdown' });
+    return;
+  }
+
   const idParam = parseInt(args[1], 10);
 
   try {
@@ -213,10 +219,15 @@ async function taskCommand(ctx: Context) {
       return;
     }
 
-    // Default to -create if it's explicitly -create or missing/unknown flag
-    const draft: TaskDraft = { chatId };
-    taskDrafts.set(userId, draft);
-    await renderTaskForm(ctx, userId, draft);
+    if (flag === '-create') {
+      const draft: TaskDraft = { chatId };
+      taskDrafts.set(userId, draft);
+      await renderTaskForm(ctx, userId, draft);
+      return;
+    }
+
+    // Unrecognized flag
+    await ctx.reply('❌ Unrecognized action. Usage:\n`/task -create`\n`/task -read <id>`\n`/task -update <id>`\n`/task -delete <id>`', { parse_mode: 'Markdown' });
   } catch (error) {
     console.error('Task command error:', error);
     await ctx.reply('❌ An error occurred processing your task request. Please try again.');
