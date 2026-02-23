@@ -14,6 +14,7 @@ type TaskField = 'name' | 'description';
 interface TaskDraft {
   chatId: number;
   messageId?: number;
+  taskId?: number;
   name?: string;
   description?: string;
   awaiting?: TaskField;
@@ -71,7 +72,11 @@ async function helpCommand(ctx: Context) {
 /start - Start the bot and see welcome message
 /help - Show this help message
 /ping - Check if the bot is responsive
-/task - Create a new to-do task
+/task - Create a new to-do task (or use flags)
+  \`-create\` : Create a task (default)
+  \`-read <id>\` : View task details
+  \`-update <id>\` : Edit a task
+  \`-delete <id>\` : Delete a task
 /tasks - List your saved tasks
 `;
 
@@ -140,15 +145,82 @@ async function renderTaskForm(ctx: Context, userId: number, draft: TaskDraft): P
 async function taskCommand(ctx: Context) {
   const userId = ctx.from?.id;
   const chatId = ctx.chat?.id;
+  const text = ctx.message && 'text' in ctx.message ? ctx.message.text : '';
 
   if (!userId || !chatId) {
     await ctx.reply('❌ Could not identify user');
     return;
   }
 
-  const draft: TaskDraft = { chatId };
-  taskDrafts.set(userId, draft);
-  await renderTaskForm(ctx, userId, draft);
+  // Parse command arguments: /task -(flag) (id)
+  const args = text.split(' ').slice(1);
+  const flag = args[0]?.toLowerCase();
+  const idParam = parseInt(args[1], 10);
+
+  try {
+    const { db } = await import('../services/database.js');
+
+    if (flag === '-read') {
+      if (isNaN(idParam)) {
+        await ctx.reply('❌ Please provide a valid task ID: `/task -read <id>`');
+        return;
+      }
+
+      const task = await db.getTask(idParam, userId);
+      if (!task) {
+        await ctx.reply('❌ Task not found.');
+        return;
+      }
+
+      const status = task.completed ? '✅ Completed' : '⬜ Pending';
+      const createdAt = new Date(task.created_at).toLocaleString();
+      await ctx.reply(`📖 *Task Details (ID: ${task.id})*\n\n*Name:* ${task.name}\n*Description:* ${task.description}\n*Status:* ${status}\n*Created:* ${createdAt}`, { parse_mode: 'Markdown' });
+      return;
+    }
+
+    if (flag === '-delete') {
+      if (isNaN(idParam)) {
+        await ctx.reply('❌ Please provide a valid task ID: `/task -delete <id>`');
+        return;
+      }
+
+      const task = await db.getTask(idParam, userId);
+      if (!task) {
+        await ctx.reply('❌ Task not found.');
+        return;
+      }
+
+      await db.deleteTask(idParam, userId);
+      await ctx.reply(`🗑️ Task deleted!`);
+      return;
+    }
+
+    if (flag === '-update') {
+      if (isNaN(idParam)) {
+        await ctx.reply('❌ Please provide a valid task ID: `/task -update <id>`');
+        return;
+      }
+
+      const task = await db.getTask(idParam, userId);
+      if (!task) {
+        await ctx.reply('❌ Task not found.');
+        return;
+      }
+
+      const draft: TaskDraft = { chatId, taskId: task.id, name: task.name, description: task.description };
+      taskDrafts.set(userId, draft);
+      await renderTaskForm(ctx, userId, draft);
+      return;
+    }
+
+    // Default to -create if it's explicitly -create or missing/unknown flag
+    const draft: TaskDraft = { chatId };
+    taskDrafts.set(userId, draft);
+    await renderTaskForm(ctx, userId, draft);
+  } catch (error) {
+    console.error('Task command error:', error);
+    await ctx.reply('❌ An error occurred processing your task request. Please try again.');
+  }
 }
 
 async function tasksCommand(ctx: Context) {
@@ -174,7 +246,7 @@ async function tasksCommand(ctx: Context) {
         ? new Date(task.created_at).toLocaleDateString()
         : 'unknown date';
 
-      return `${index + 1}. ${status} ${task.name}\n   ${task.description}\n   Created: ${createdAt}`;
+      return `${index + 1}. ${status} [ID: ${task.id}] ${task.name}\n   ${task.description}\n   Created: ${createdAt}`;
     });
 
     const buttons = tasks.map((task, index) =>
@@ -242,9 +314,16 @@ async function taskActionCommand(ctx: Context) {
 
   try {
     const { db } = await import('../services/database.js');
-    await db.createTask(userId, draft.name.trim(), draft.description.trim());
 
-    const confirmation = `✅ Task saved!\n\nName: ${draft.name.trim()}\nDescription: ${draft.description.trim()}`;
+    let confirmation = '';
+
+    if (draft.taskId) {
+      await db.updateTask(draft.taskId, userId, draft.name.trim(), draft.description.trim());
+      confirmation = `✏️ Task (ID: ${draft.taskId}) updated!\n\nName: ${draft.name.trim()}\nDescription: ${draft.description.trim()}`;
+    } else {
+      await db.createTask(userId, draft.name.trim(), draft.description.trim());
+      confirmation = `✅ Task created!\n\nName: ${draft.name.trim()}\nDescription: ${draft.description.trim()}`;
+    }
 
     try {
       if (draft.messageId) {
@@ -321,7 +400,7 @@ async function toggleTaskActionCommand(ctx: Context) {
         ? new Date(task.created_at).toLocaleDateString()
         : 'unknown date';
 
-      return `${index + 1}. ${status} ${task.name}\n   ${task.description}\n   Created: ${createdAt}`;
+      return `${index + 1}. ${status} [ID: ${task.id}] ${task.name}\n   ${task.description}\n   Created: ${createdAt}`;
     });
 
     const buttons = tasks.map((task, index) =>

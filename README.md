@@ -87,10 +87,16 @@ npm start
 
 ### `/task` Usage
 
-1. Send `/task`
+1. Send `/task` or `/task -create`
 2. Tap `Name`, then send the task name as your next message
 3. Tap `Description`, then send the description as your next message
 4. Tap `Submit` to save the task
+
+**CRUD Operations:**
+You can manage specific tasks using their ID (find the ID via `/tasks`):
+- `/task -read <id>`: View full details of a task
+- `/task -update <id>`: Opens the interactive form to edit an existing task
+- `/task -delete <id>`: Deletes the task from your list
 
 Expected behavior:
 - The bot keeps one in-progress task draft per user while filling the form.

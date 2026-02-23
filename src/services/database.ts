@@ -91,6 +91,32 @@ export class DatabaseService {
     }
   }
 
+  async updateTask(taskId: number, userId: number, name: string, description: string) {
+    const { error } = await this.client
+      .from('tasks')
+      .update({ name, description })
+      .eq('id', taskId)
+      .eq('user_id', userId);
+
+    if (error) {
+      console.error('Error updating task details:', error);
+      throw error;
+    }
+  }
+
+  async deleteTask(taskId: number, userId: number) {
+    const { error } = await this.client
+      .from('tasks')
+      .delete()
+      .eq('id', taskId)
+      .eq('user_id', userId);
+
+    if (error) {
+      console.error('Error deleting task:', error);
+      throw error;
+    }
+  }
+
   async getTasksByUser(userId: number, limit = 20) {
     const { data, error } = await this.client
       .from('tasks')
