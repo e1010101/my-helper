@@ -73,7 +73,7 @@ async function helpCommand(ctx: Context) {
 /help - Show this help message
 /ping - Check if the bot is responsive
 /task - Create a new to-do task (or use flags)
-  \`-create\` : Create a task (default)
+  \`-create\` : Create a task
   \`-read <id>\` : View task details
   \`-update <id>\` : Edit a task
   \`-delete <id>\` : Delete a task
@@ -159,11 +159,6 @@ async function taskCommand(ctx: Context) {
   if (!flag) {
     await ctx.reply('❌ Please specify an action. Usage:\n`/task -create`\n`/task -read <id>`\n`/task -update <id>`\n`/task -delete <id>`', { parse_mode: 'Markdown' });
     return;
-  }
-
-  // Normalize flag to include hyphen
-  if (!flag.startsWith('-')) {
-    flag = '-' + flag;
   }
 
   const idParam = parseInt(args[1], 10);
