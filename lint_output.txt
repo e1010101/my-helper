@@ -1,0 +1,15 @@
+
+> my-helper-bot@1.0.0 lint
+> eslint src --ext .ts
+
+
+D:\GitHub\my-helper\src\bot.ts
+  144:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+D:\GitHub\my-helper\src\commands\index.ts
+  157:7   error    'flag' is never reassigned. Use 'const' instead  prefer-const
+  384:25  warning  Unexpected any. Specify a different type         @typescript-eslint/no-explicit-any
+
+✖ 3 problems (1 error, 2 warnings)
+  1 error and 0 warnings potentially fixable with the `--fix` option.
+

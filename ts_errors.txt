@@ -1,0 +1,1 @@
+src/services/ai.ts(39,19): error TS6133: 'chat' is declared but its value is never read.

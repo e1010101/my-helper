@@ -5,6 +5,7 @@ import { registerCommands } from './commands/index.js';
 import { db } from './services/database.js';
 import { HealthService } from './services/health.js';
 import { logger } from './services/logger.js';
+import { aiService } from './services/ai.js';
 
 let healthServiceInstance: HealthService | null = null;
 
@@ -53,15 +54,27 @@ export class Bot {
   private setupCommands() {
     registerCommands(this.bot);
 
-    // Handle unknown commands
+    // Handle unknown commands and general text messages
     this.bot.on('text', async (ctx, next) => {
       const text = ctx.message.text;
+      const userId = ctx.from?.id;
+
       if (text.startsWith('/')) {
         const command = text.split(' ')[0];
         // If we get here, the command wasn't handled
         await ctx.reply(
           `❓ Unknown command: ${command}\n\nUse /help to see available commands.`
         );
+      } else if (userId) {
+        // It's a regular text message, let's pass it to Gemini
+        try {
+          await ctx.sendChatAction('typing');
+          const aiResponse = await aiService.generateResponse(userId, text);
+          await ctx.reply(aiResponse, { parse_mode: 'Markdown' });
+        } catch (error) {
+          logger.error('Error generating AI response in bot handler', error);
+          await ctx.reply('🤖 Sorry, I am having trouble connecting to my brain right now. Please try again later.');
+        }
       }
       await next();
     });
