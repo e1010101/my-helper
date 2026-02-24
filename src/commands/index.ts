@@ -74,7 +74,7 @@ async function helpCommand(ctx: Context) {
 /ping - Check if the bot is responsive
 /task - Create a new to-do task (or use flags)
   \`-create\` : Create a task
-  \`-read <id>\` : View task details
+  \`-read <id>\` : View task details (\`all\` to list all)
   \`-update <id>\` : Edit a task
   \`-delete <id>\` : Delete a task
 /tasks - List your saved tasks
@@ -167,8 +167,13 @@ async function taskCommand(ctx: Context) {
     const { db } = await import('../services/database.js');
 
     if (flag === '-read') {
+      if (args[1]?.toLowerCase() === 'all') {
+        await tasksCommand(ctx);
+        return;
+      }
+
       if (isNaN(idParam)) {
-        await ctx.reply('❌ Please provide a valid task ID: `/task -read <id>`');
+        await ctx.reply('❌ Please provide a valid task ID: `/task -read <id>` or `/task -read all`');
         return;
       }
 

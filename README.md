@@ -94,7 +94,7 @@ npm start
 
 **CRUD Operations:**
 You can manage specific tasks using their ID (find the ID via `/tasks`):
-- `/task -read <id>`: View full details of a task
+- `/task -read <id>`: View full details of a task (or `-read all` to list all tasks)
 - `/task -update <id>`: Opens the interactive form to edit an existing task
 - `/task -delete <id>`: Deletes the task from your list
 
