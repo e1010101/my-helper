@@ -1,0 +1,6 @@
+
+> my-helper-bot@1.0.0 dev
+> tsx watch src/index.ts
+
+≡ƒÜÇ Initializing bot...
+[2026-02-27T16:55:03.831Z] [ERROR] HTTP server error {"message":"listen EADDRINUSE: address already in use :::3000","stack":"Error: listen EADDRINUSE: address already in use :::3000\n    at Server.setupListenHandle [as _listen2] (node:net:1940:16)\n    at listenInCluster (node:net:1997:12)\n    at Server.listen (node:net:2102:7)\n    at <anonymous> (D:\\GitHub\\my-helper\\src\\bot.ts:214:26)\n    at new Promise (<anonymous>)\n    at Bot.start (D:\\GitHub\\my-helper\\src\\bot.ts:213:13)\n    at main (D:\\GitHub\\my-helper\\src\\index.ts:7:15)\n    at <anonymous> (D:\\GitHub\\my-helper\\src\\index.ts:14:1)\n    at ModuleJob.run (node:internal/modules/esm/module_job:343:25)\n    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:665:26)"}

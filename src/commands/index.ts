@@ -154,7 +154,7 @@ async function taskCommand(ctx: Context) {
 
   // Parse command arguments: /task -(flag) (id)
   const args = text.split(' ').slice(1);
-  let flag = args[0]?.toLowerCase();
+  const flag = args[0]?.toLowerCase();
 
   if (!flag) {
     await ctx.reply('❌ Please specify an action. Usage:\n`/task -create`\n`/task -read <id>`\n`/task -update <id>`\n`/task -delete <id>`', { parse_mode: 'Markdown' });
