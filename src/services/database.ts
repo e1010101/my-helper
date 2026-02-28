@@ -132,6 +132,43 @@ export class DatabaseService {
 
     return data || [];
   }
+
+  // --- Prompts Feature ---
+
+  async savePrompt(userId: number, title: string, prompt: string, tags: string[], imageFileId: string) {
+    const { error } = await this.client
+      .from('prompts')
+      .insert({
+        user_id: userId,
+        title,
+        prompt,
+        tags,
+        image_file_id: imageFileId,
+        created_at: new Date(),
+        updated_at: new Date()
+      });
+
+    if (error) {
+      console.error('Error saving prompt:', error);
+      throw error;
+    }
+  }
+
+  async getPromptsByUser(userId: number, limit = 20) {
+    const { data, error } = await this.client
+      .from('prompts')
+      .select('id, title, prompt, tags, image_file_id, created_at, updated_at')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (error) {
+      console.error('Error fetching prompts:', error);
+      throw error;
+    }
+
+    return data || [];
+  }
 }
 
 export const db = new DatabaseService();

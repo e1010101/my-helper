@@ -42,7 +42,7 @@ export class AIService {
 
             // We will re-create the chat with the stored history to maintain context
             const chatSession = this.ai.chats.create({
-                model: 'gemini-3.1-pro',
+                model: 'gemini-2.5-flash',
                 config: {
                     systemInstruction: config.gemini.personalityPrompt,
                 },

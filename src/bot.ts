@@ -1,7 +1,7 @@
 import { Telegraf } from 'telegraf';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { config } from './config/env.js';
-import { registerCommands } from './commands/index.js';
+import { registerCommands, isUserInPromptFlow } from './commands/index.js';
 import { db } from './services/database.js';
 import { HealthService } from './services/health.js';
 import { logger } from './services/logger.js';
@@ -68,6 +68,13 @@ export class Bot {
           `❓ Unknown command: ${command}\n\nUse /help to see available commands.`
         );
       } else if (userId) {
+        // Check if user is currently filling out a prompt form
+        if (isUserInPromptFlow(userId)) {
+          logger.info(`Skipping AI response because user ${userId} is in prompt flow`);
+          await next();
+          return;
+        }
+
         // It's a regular text message, let's pass it to Gemini
         try {
           logger.info(`Passing text to AI service for userId ${userId}`);
