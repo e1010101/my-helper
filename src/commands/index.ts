@@ -1,4 +1,7 @@
 import { Telegraf, Context, Markup } from 'telegraf';
+import { promptCommand, promptTextInputHandler, promptPhotoInputHandler, isUserInPromptFlow } from './prompt.js';
+
+export { isUserInPromptFlow };
 
 export interface BotCommand {
   command: string;
@@ -44,10 +47,18 @@ export function registerCommands(bot: Telegraf): void {
   bot.command('ping', pingCommand);
   bot.command('task', taskCommand);
   bot.command('tasks', tasksCommand);
+  bot.command('prompt', promptCommand);
   bot.action(/^task:(set_name|set_description|submit)$/, taskActionCommand);
   bot.action(/^task:toggle:(\d+)$/, toggleTaskActionCommand);
   bot.on('text', async (ctx, next) => {
-    await taskTextInputHandler(ctx);
+    const promptHandled = await promptTextInputHandler(ctx);
+    if (!promptHandled) {
+      await taskTextInputHandler(ctx);
+    }
+    await next();
+  });
+  bot.on('photo', async (ctx, next) => {
+    await promptPhotoInputHandler(ctx);
     await next();
   });
   bot.command('status', statusCommand);
@@ -78,6 +89,7 @@ async function helpCommand(ctx: Context) {
   \`-update <id>\` : Edit a task
   \`-delete <id>\` : Delete a task
 /tasks - List your saved tasks
+/prompt - Create and save a new prompt template
 `;
 
   if (isAdminUser) {
