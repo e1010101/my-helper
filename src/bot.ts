@@ -59,6 +59,8 @@ export class Bot {
       const text = ctx.message.text;
       const userId = ctx.from?.id;
 
+      logger.info(`Received text message in fallback handler from userId ${userId}: ${text}`);
+
       if (text.startsWith('/')) {
         const command = text.split(' ')[0];
         // If we get here, the command wasn't handled
@@ -68,8 +70,10 @@ export class Bot {
       } else if (userId) {
         // It's a regular text message, let's pass it to Gemini
         try {
+          logger.info(`Passing text to AI service for userId ${userId}`);
           await ctx.sendChatAction('typing');
           const aiResponse = await aiService.generateResponse(userId, text);
+          logger.info(`AI Response generated: ${aiResponse.substring(0, 50)}...`);
           await ctx.reply(aiResponse, { parse_mode: 'Markdown' });
         } catch (error) {
           logger.error('Error generating AI response in bot handler', error);
