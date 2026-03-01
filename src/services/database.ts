@@ -169,6 +169,31 @@ export class DatabaseService {
 
     return data || [];
   }
+
+  async searchPrompts(userId: number, titleQuery?: string, tagsQuery?: string[]) {
+    let query = this.client
+      .from('prompts')
+      .select('id, title, prompt, tags, image_file_id, created_at, updated_at')
+      .eq('user_id', userId);
+
+    if (titleQuery) {
+      query = query.ilike('title', `%${titleQuery}%`);
+    }
+
+    if (tagsQuery && tagsQuery.length > 0) {
+      query = query.contains('tags', tagsQuery);
+    }
+
+    // Default order by newest
+    const { data, error } = await query.order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Error searching prompts:', error);
+      throw error;
+    }
+
+    return data || [];
+  }
 }
 
 export const db = new DatabaseService();
