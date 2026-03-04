@@ -1,66 +1,169 @@
-import { GoogleGenAI } from '@google/genai';
+import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
+import { HumanMessage, AIMessage, SystemMessage, ToolMessage } from '@langchain/core/messages';
+import type { BaseMessage } from '@langchain/core/messages';
+import type { DynamicTool } from '@langchain/core/tools';
 import { config } from '../config/env.js';
 import { logger } from './logger.js';
+import { createTasksTool, createVectorSearchTool } from './tools.js';
 
-export interface ChatMessage {
-    role: 'user' | 'model';
-    parts: { text: string }[];
+// ── Per-user conversation memory ────────────────────────────────────
+const MAX_HISTORY = 10; // keep last 10 messages (5 turns)
+const historyStore = new Map<number, BaseMessage[]>();
+
+function getHistory(userId: number): BaseMessage[] {
+    return historyStore.get(userId) || [];
 }
 
-export class AIService {
-    private ai: GoogleGenAI;
-    // Simple in-memory context store: userId -> ChatMessage[]
-    private contextStore: Map<number, ChatMessage[]> = new Map();
-    // 10 messages = 5 turns
-    private readonly MAX_HISTORY_LENGTH = 10;
-
-    constructor() {
-        this.ai = new GoogleGenAI({
-            apiKey: config.gemini.apiKey,
-        });
+function pushHistory(userId: number, ...msgs: BaseMessage[]) {
+    const hist = getHistory(userId);
+    hist.push(...msgs);
+    // Trim to keep the last MAX_HISTORY messages
+    if (hist.length > MAX_HISTORY) {
+        historyStore.set(userId, hist.slice(hist.length - MAX_HISTORY));
+    } else {
+        historyStore.set(userId, hist);
     }
+}
 
-    private getHistory(userId: number): ChatMessage[] {
-        return this.contextStore.get(userId) || [];
-    }
+// ── LLM instances ───────────────────────────────────────────────────
+// Plain chat model (no tools) for regular messages
+const chatLLM = new ChatGoogleGenerativeAI({
+    apiKey: config.gemini.apiKey,
+    model: 'gemini-2.5-flash',
+    maxOutputTokens: 2048,
+});
 
-    private saveHistory(userId: number, messages: ChatMessage[]) {
-        // Keep only the last MAX_HISTORY_LENGTH messages
-        if (messages.length > this.MAX_HISTORY_LENGTH) {
-            messages = messages.slice(messages.length - this.MAX_HISTORY_LENGTH);
+// Agent model with tools bound (created per-user because tools are user-scoped)
+const agentModels = new Map<number, ReturnType<typeof chatLLM.bindTools>>();
+const userTools = new Map<number, Map<string, DynamicTool>>();
+
+function getAgentModel(userId: number) {
+    let model = agentModels.get(userId);
+    if (!model) {
+        const tools: DynamicTool[] = [
+            createTasksTool(userId),
+            createVectorSearchTool(userId),
+        ];
+        model = chatLLM.bindTools(tools);
+        agentModels.set(userId, model);
+
+        // Index tools by name for quick lookup during the tool-call loop
+        const toolMap = new Map<string, DynamicTool>();
+        for (const t of tools) {
+            toolMap.set(t.name, t);
         }
-        this.contextStore.set(userId, messages);
+        userTools.set(userId, toolMap);
+    }
+    return model;
+}
+
+// ── System prompt ───────────────────────────────────────────────────
+const AGENT_SYSTEM_PROMPT = new SystemMessage(
+    config.gemini.personalityPrompt +
+    '\n\nYou have access to tools that let you look up the user\'s tasks and ' +
+    'semantically search their saved content. Use these tools when the user ' +
+    'asks about their tasks, prompts, or any previously saved information. ' +
+    'Always prefer using the tools to provide accurate, up-to-date information ' +
+    'rather than guessing.',
+);
+
+const CHAT_SYSTEM_PROMPT = new SystemMessage(config.gemini.personalityPrompt);
+
+// ── Public API ──────────────────────────────────────────────────────
+
+export class AIService {
+    /**
+     * Agentic response for /ask – runs a tool-calling loop.
+     * The model decides whether to call tools or respond directly.
+     */
+    public async agentResponse(userId: number, input: string): Promise<string> {
+        const MAX_ITERATIONS = 5;
+        try {
+            const model = getAgentModel(userId);
+            const toolMap = userTools.get(userId)!;
+            const history = getHistory(userId);
+
+            const messages: BaseMessage[] = [
+                AGENT_SYSTEM_PROMPT,
+                ...history,
+                new HumanMessage(input),
+            ];
+
+            let iterations = 0;
+            while (iterations < MAX_ITERATIONS) {
+                iterations++;
+                const response = await model.invoke(messages);
+                messages.push(response);
+
+                // Check if the model wants to call tools
+                const toolCalls = response.tool_calls;
+                if (!toolCalls || toolCalls.length === 0) {
+                    // No tool calls → final answer
+                    const answer = typeof response.content === 'string'
+                        ? response.content
+                        : JSON.stringify(response.content);
+
+                    // Save to memory
+                    pushHistory(userId, new HumanMessage(input), new AIMessage(answer));
+                    return answer || 'I have nothing to say.';
+                }
+
+                // Execute each tool call and feed results back
+                for (const tc of toolCalls) {
+                    const tool = toolMap.get(tc.name);
+                    if (!tool) {
+                        logger.warn(`Agent requested unknown tool: ${tc.name}`);
+                        messages.push(new ToolMessage({
+                            tool_call_id: tc.id ?? tc.name,
+                            content: `Error: unknown tool "${tc.name}"`,
+                        }));
+                        continue;
+                    }
+
+                    logger.info(`[Agent] calling tool "${tc.name}" with args: ${JSON.stringify(tc.args)}`);
+                    const toolResult = await tool.invoke(
+                        typeof tc.args === 'string' ? tc.args : JSON.stringify(tc.args),
+                    );
+                    messages.push(new ToolMessage({
+                        tool_call_id: tc.id ?? tc.name,
+                        content: typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult),
+                    }));
+                }
+                // Loop back so the model can react to tool results
+            }
+
+            // If we hit max iterations, return whatever we have
+            const last = messages[messages.length - 1];
+            const fallback = typeof last.content === 'string' ? last.content : 'I ran out of thinking steps. Please try rephrasing.';
+            pushHistory(userId, new HumanMessage(input), new AIMessage(fallback));
+            return fallback;
+        } catch (error) {
+            logger.error('LangChain agent error', error);
+            throw new Error('Failed to generate agent response');
+        }
     }
 
+    /**
+     * Simple chat response for regular text messages (non-agentic).
+     */
     public async generateResponse(userId: number, messageText: string): Promise<string> {
         try {
-            const history = this.getHistory(userId);
+            const history = getHistory(userId);
 
-            // V1 context management: We create a new chat instance but feed it the history manually if needed,
-            // or we can use the GenAI SDK's build-in chat history by initializing chat with history.
-            // For now, let's use the SDK's chat history feature cleanly.
+            const messages: BaseMessage[] = [
+                CHAT_SYSTEM_PROMPT,
+                ...history,
+                new HumanMessage(messageText),
+            ];
 
-            // We will re-create the chat with the stored history to maintain context
-            const chatSession = this.ai.chats.create({
-                model: 'gemini-2.5-flash',
-                config: {
-                    systemInstruction: config.gemini.personalityPrompt,
-                },
-                history: history.length > 0 ? history : undefined,
-            });
+            const response = await chatLLM.invoke(messages);
+            const text = typeof response.content === 'string'
+                ? response.content
+                : JSON.stringify(response.content);
 
-            const response = await chatSession.sendMessage({ message: messageText });
+            pushHistory(userId, new HumanMessage(messageText), new AIMessage(text || ''));
 
-            // Update our history store with the new messages
-            // The GenAI SDK's chatSession.getHistory() might be asynchronous or synchronous depending on the SDK version,
-            // But typically we can just append to our own state or extract it.
-            // For now, let's just push manually to our store to be safe.
-
-            history.push({ role: 'user', parts: [{ text: messageText }] });
-            history.push({ role: 'model', parts: [{ text: response.text || '' }] });
-            this.saveHistory(userId, history);
-
-            return response.text || 'I have nothing to say.';
+            return text || 'I have nothing to say.';
         } catch (error) {
             logger.error('Gemini API Error', error);
             throw new Error('Failed to generate AI response');
@@ -68,7 +171,9 @@ export class AIService {
     }
 
     public clearHistory(userId: number) {
-        this.contextStore.delete(userId);
+        historyStore.delete(userId);
+        agentModels.delete(userId);
+        userTools.delete(userId);
     }
 }
 

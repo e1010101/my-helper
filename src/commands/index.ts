@@ -1,6 +1,7 @@
 import { Telegraf, Context, Markup } from 'telegraf';
 import { promptCommand, promptTextInputHandler, promptPhotoInputHandler, isUserInPromptFlow } from './prompt.js';
 import { getPromptCommand, getPromptActionHandler } from './getprompt.js';
+import { askCommand } from './ask.js';
 
 export { isUserInPromptFlow };
 
@@ -50,6 +51,7 @@ export function registerCommands(bot: Telegraf): void {
   bot.command('tasks', tasksCommand);
   bot.command('prompt', promptCommand);
   bot.command('getprompt', getPromptCommand);
+  bot.command('ask', askCommand);
   bot.action(/^getprompt:(next|prev)$/, getPromptActionHandler);
   bot.action(/^task:(set_name|set_description|submit)$/, taskActionCommand);
   bot.action(/^task:toggle:(\d+)$/, toggleTaskActionCommand);
@@ -96,6 +98,7 @@ async function helpCommand(ctx: Context) {
 /getprompt - Retrieve saved prompts
   \`-title <text>\` : Search by title
   \`-tag <tag1,tag2>\` : Search by tags
+/ask - Ask an intelligent question (uses AI agent)
 `;
 
   if (isAdminUser) {

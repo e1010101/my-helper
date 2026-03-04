@@ -194,6 +194,19 @@ export class DatabaseService {
 
     return data || [];
   }
+
+  // --- AI Feedback ---
+
+  async saveAiFeedback(userId: number, messageId: number, type: 'thumbs_up' | 'thumbs_down') {
+    const { error } = await this.client
+      .from('ai_feedback')
+      .insert({ user_id: userId, message_id: messageId, type });
+
+    if (error) {
+      console.error('Error saving AI feedback:', error);
+      throw error;
+    }
+  }
 }
 
 export const db = new DatabaseService();

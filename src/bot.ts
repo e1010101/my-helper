@@ -89,6 +89,37 @@ export class Bot {
       }
       await next();
     });
+
+    // ── Feedback buttons for /ask replies ────────────────────────────
+    this.bot.action(/^ask_feedback:(thumbs_up|thumbs_down)$/, async (ctx) => {
+      const userId = ctx.from?.id;
+      const match = (ctx as any).match as RegExpExecArray | undefined;
+      const feedbackType = match?.[1] as 'thumbs_up' | 'thumbs_down' | undefined;
+      const messageId = ctx.callbackQuery?.message?.message_id;
+
+      if (!userId || !feedbackType || !messageId) {
+        await ctx.answerCbQuery();
+        return;
+      }
+
+      try {
+        await db.saveAiFeedback(userId, messageId, feedbackType);
+        const emoji = feedbackType === 'thumbs_up' ? '👍' : '👎';
+        await ctx.answerCbQuery(`${emoji} Thanks for your feedback!`);
+
+        // Remove the keyboard after feedback is given
+        try {
+          if (ctx.callbackQuery.message && 'text' in ctx.callbackQuery.message) {
+            await ctx.editMessageReplyMarkup(undefined);
+          }
+        } catch {
+          // Ignore if message can't be edited
+        }
+      } catch (error) {
+        logger.error('Error saving AI feedback', error);
+        await ctx.answerCbQuery('Failed to save feedback', { show_alert: true });
+      }
+    });
   }
 
   private setupErrorHandling() {
