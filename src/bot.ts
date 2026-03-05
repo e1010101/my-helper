@@ -164,6 +164,19 @@ export class Bot {
   }
 
   async start() {
+    // Register commands with Telegram so they appear in the autocomplete menu
+    await this.bot.telegram.setMyCommands([
+      { command: 'start', description: 'Start the bot and see welcome message' },
+      { command: 'help', description: 'Show available commands' },
+      { command: 'ping', description: 'Check if the bot is responsive' },
+      { command: 'task', description: 'Create or manage tasks (-create, -read, -update, -delete)' },
+      { command: 'tasks', description: 'List your saved tasks' },
+      { command: 'prompt', description: 'Create and save a new prompt template' },
+      { command: 'getprompt', description: 'Retrieve saved prompts (-title, -tag)' },
+      { command: 'ask', description: 'Ask an intelligent question (AI agent)' },
+    ]);
+    logger.info('Bot commands registered with Telegram');
+
     if (config.webhook) {
       // Webhook mode (for production)
       // Create custom HTTP server that handles both webhook and health endpoint
