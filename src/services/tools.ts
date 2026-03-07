@@ -1,6 +1,7 @@
-import { DynamicTool } from '@langchain/core/tools';
+import { DynamicStructuredTool } from '@langchain/core/tools';
+import { z } from 'zod';
 import { SupabaseVectorStore } from '@langchain/community/vectorstores/supabase';
-import { GoogleGenerativeAIEmbeddings } from '@langchain/google-genai';
+import { HuggingFaceTransformersEmbeddings } from '@langchain/community/embeddings/huggingface_transformers';
 import { createClient } from '@supabase/supabase-js';
 import { config } from '../config/env.js';
 import { db } from './database.js';
@@ -10,9 +11,8 @@ import { logger } from './logger.js';
 const supabaseClient = createClient(config.supabase.url, config.supabase.anonKey);
 
 // ── Embeddings model ─────────────────────────────────────────────────
-const embeddings = new GoogleGenerativeAIEmbeddings({
-    apiKey: config.gemini.apiKey,
-    model: 'text-embedding-004',    // 768-dimensional embeddings
+const embeddings = new HuggingFaceTransformersEmbeddings({
+    model: 'Xenova/all-mpnet-base-v2', // 768-dimensional embeddings to match existing Supabase pgvector setup
 });
 
 // ── Vector store (lazy singleton) ────────────────────────────────────
@@ -38,14 +38,19 @@ export { getVectorStore, embeddings };
  * TasksTool – retrieves the current user's task list from the database.
  * The agent calls this when the user asks about their tasks.
  */
-export function createTasksTool(userId: number): DynamicTool {
-    return new DynamicTool({
+export function createTasksTool(userId: number): DynamicStructuredTool {
+    return new DynamicStructuredTool({
         name: 'get_user_tasks',
+        schema: z.object({
+            input: z.string().optional().describe('Optional input that is ignored for this tool'),
+        }),
         description:
             'Fetches the current user\'s task list from the database. ' +
             'Returns task id, name, description, completed status, and creation date. ' +
-            'Use this when the user asks about their tasks, to-dos, or work items.',
-        func: async (_input: string): Promise<string> => {
+            'Use this when the user asks about their tasks, to-dos, or work items. ' +
+            'IMPORTANT: When this returns tasks, you MUST list them ALL out to the user in a readable format. ' +
+            'Do not just ask which task they want to see; output the full list of tasks, including their descriptions and status.',
+        func: async (): Promise<string> => {
             try {
                 const tasks = await db.getTasksByUser(userId, 20);
                 if (tasks.length === 0) {
@@ -72,14 +77,17 @@ export function createTasksTool(userId: number): DynamicTool {
  * VectorSearchTool – performs semantic search across all embedded app content
  * (tasks, prompts, etc.) using LangChain's SupabaseVectorStore retriever.
  */
-export function createVectorSearchTool(userId: number): DynamicTool {
-    return new DynamicTool({
+export function createVectorSearchTool(userId: number): DynamicStructuredTool {
+    return new DynamicStructuredTool({
         name: 'semantic_search',
+        schema: z.object({
+            query: z.string().describe('The natural-language search query to find documents about.'),
+        }),
         description:
             'Performs a semantic / similarity search across saved prompts, tasks, and other indexed content. ' +
             'Input should be a natural-language query string describing what the user is looking for. ' +
             'Use this when the user asks you to find, recall, or look up previously saved information.',
-        func: async (query: string): Promise<string> => {
+        func: async ({ query }: { query: string }): Promise<string> => {
             try {
                 const store = getVectorStore();
                 const results = await store.similaritySearch(query, 5, {

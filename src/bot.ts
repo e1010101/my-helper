@@ -75,7 +75,7 @@ export class Bot {
           return;
         }
 
-        // It's a regular text message, let's pass it to Gemini
+        // It's a regular text message, let's pass it to the AI model
         try {
           logger.info(`Passing text to AI service for userId ${userId}`);
           await ctx.sendChatAction('typing');
@@ -214,7 +214,14 @@ export class Bot {
 
       // Create HTTP server that handles both webhook and health
       const webhookServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-        // Health check endpoint
+        // Lightweight liveness probe for Railway health check
+        if (req.url === '/' && req.method === 'GET') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'ok' }));
+          return;
+        }
+
+        // Deep health check endpoint (for admin/monitoring)
         if (req.url === '/health' && req.method === 'GET') {
           try {
             const health = await this.healthService.getHealthStatus();
@@ -265,6 +272,14 @@ export class Bot {
         this.httpServer?.listen(port, () => {
           logger.info(`Health endpoint listening on port ${port}`);
           resolve();
+        }).on('error', (err: any) => {
+          if (err.code === 'EADDRINUSE') {
+            logger.warn(`Port ${port} is already in use by another instance. Health endpoint disabled for this run.`);
+            resolve();
+          } else {
+            logger.error('Health endpoint error', err);
+            resolve(); // Don't crash the bot if the side-server fails
+          }
         });
       });
 

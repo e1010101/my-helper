@@ -1,7 +1,7 @@
-import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
+import { ChatGroq } from '@langchain/groq';
 import { HumanMessage, AIMessage, SystemMessage, ToolMessage } from '@langchain/core/messages';
 import type { BaseMessage } from '@langchain/core/messages';
-import type { DynamicTool } from '@langchain/core/tools';
+import type { DynamicStructuredTool } from '@langchain/core/tools';
 import { config } from '../config/env.js';
 import { logger } from './logger.js';
 import { createTasksTool, createVectorSearchTool } from './tools.js';
@@ -27,20 +27,20 @@ function pushHistory(userId: number, ...msgs: BaseMessage[]) {
 
 // ── LLM instances ───────────────────────────────────────────────────
 // Plain chat model (no tools) for regular messages
-const chatLLM = new ChatGoogleGenerativeAI({
-    apiKey: config.gemini.apiKey,
-    model: 'gemini-2.5-flash',
-    maxOutputTokens: 2048,
+const chatLLM = new ChatGroq({
+    apiKey: config.groq.apiKey,
+    model: 'llama-3.1-8b-instant',
+    maxTokens: 2048,
 });
 
 // Agent model with tools bound (created per-user because tools are user-scoped)
 const agentModels = new Map<number, ReturnType<typeof chatLLM.bindTools>>();
-const userTools = new Map<number, Map<string, DynamicTool>>();
+const userTools = new Map<number, Map<string, DynamicStructuredTool>>();
 
 function getAgentModel(userId: number) {
     let model = agentModels.get(userId);
     if (!model) {
-        const tools: DynamicTool[] = [
+        const tools: DynamicStructuredTool[] = [
             createTasksTool(userId),
             createVectorSearchTool(userId),
         ];
@@ -48,7 +48,7 @@ function getAgentModel(userId: number) {
         agentModels.set(userId, model);
 
         // Index tools by name for quick lookup during the tool-call loop
-        const toolMap = new Map<string, DynamicTool>();
+        const toolMap = new Map<string, DynamicStructuredTool>();
         for (const t of tools) {
             toolMap.set(t.name, t);
         }
@@ -59,15 +59,19 @@ function getAgentModel(userId: number) {
 
 // ── System prompt ───────────────────────────────────────────────────
 const AGENT_SYSTEM_PROMPT = new SystemMessage(
-    config.gemini.personalityPrompt +
+    config.groq.personalityPrompt +
     '\n\nYou have access to tools that let you look up the user\'s tasks and ' +
     'semantically search their saved content. Use these tools when the user ' +
     'asks about their tasks, prompts, or any previously saved information. ' +
     'Always prefer using the tools to provide accurate, up-to-date information ' +
-    'rather than guessing.',
+    'rather than guessing.\n\n' +
+    'IMPORTANT: When a tool returns a list of items (like tasks or prompts), you MUST ' +
+    'present the FULL list to the user in a styled, readable format. Do NOT summarize ' +
+    'or withhold items asking the user if they want to see them. ALWAYS output the full ' +
+    'details you receive from the tool.',
 );
 
-const CHAT_SYSTEM_PROMPT = new SystemMessage(config.gemini.personalityPrompt);
+const CHAT_SYSTEM_PROMPT = new SystemMessage(config.groq.personalityPrompt);
 
 // ── Public API ──────────────────────────────────────────────────────
 
@@ -92,7 +96,19 @@ export class AIService {
             let iterations = 0;
             while (iterations < MAX_ITERATIONS) {
                 iterations++;
-                const response = await model.invoke(messages);
+                let response;
+                try {
+                    response = await model.invoke(messages);
+                } catch (invokeErr: any) {
+                    // Groq sometimes throws 400 invalid_request_error with code tool_use_failed
+                    if (invokeErr?.error?.code === 'tool_use_failed') {
+                        logger.warn('Groq tool use failed, stripping tools for this turn');
+                        const plainModel = chatLLM.bindTools([]);
+                        response = await plainModel.invoke(messages);
+                    } else {
+                        throw invokeErr;
+                    }
+                }
                 messages.push(response);
 
                 // Check if the model wants to call tools
@@ -121,9 +137,19 @@ export class AIService {
                     }
 
                     logger.info(`[Agent] calling tool "${tc.name}" with args: ${JSON.stringify(tc.args)}`);
-                    const toolResult = await tool.invoke(
-                        typeof tc.args === 'string' ? tc.args : JSON.stringify(tc.args),
-                    );
+                    
+                    let parsedArgs: any = {};
+                    if (typeof tc.args === 'string') {
+                        try {
+                            parsedArgs = JSON.parse(tc.args);
+                        } catch {
+                            parsedArgs = tc.args; // Fallback if poorly formed string
+                        }
+                    } else if (tc.args !== null) {
+                        parsedArgs = tc.args;
+                    }
+
+                    const toolResult = await tool.invoke(parsedArgs);
                     messages.push(new ToolMessage({
                         tool_call_id: tc.id ?? tc.name,
                         content: typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult),
@@ -165,7 +191,7 @@ export class AIService {
 
             return text || 'I have nothing to say.';
         } catch (error) {
-            logger.error('Gemini API Error', error);
+            logger.error('Groq API Error', error);
             throw new Error('Failed to generate AI response');
         }
     }
