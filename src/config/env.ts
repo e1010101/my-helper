@@ -44,7 +44,7 @@ export const config: Config = {
   webhook: process.env.WEBHOOK_DOMAIN
     ? {
       domain: process.env.WEBHOOK_DOMAIN,
-      port: parseInt(process.env.WEBHOOK_PORT || '3000', 10),
+      port: parseInt(process.env.PORT || process.env.WEBHOOK_PORT || '3000', 10),
     }
     : undefined,
   nodeEnv: process.env.NODE_ENV || 'development',

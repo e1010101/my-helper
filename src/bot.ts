@@ -271,8 +271,8 @@ export class Bot {
 
       // Start the webhook server
       await new Promise<void>((resolve) => {
-        webhookServer.listen(port, () => {
-          logger.info(`Webhook server listening on port ${port}`);
+        webhookServer.listen(port, '0.0.0.0', () => {
+          logger.info(`Webhook server listening on port ${port} at 0.0.0.0`);
           resolve();
         });
       });
@@ -290,8 +290,8 @@ export class Bot {
       // Start standalone HTTP server for health checks
       const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
       await new Promise<void>((resolve) => {
-        this.httpServer?.listen(port, () => {
-          logger.info(`Health endpoint listening on port ${port}`);
+        this.httpServer?.listen(port, '0.0.0.0', () => {
+          logger.info(`Health endpoint listening on port ${port} at 0.0.0.0`);
           resolve();
         }).on('error', (err: any) => {
           if (err.code === 'EADDRINUSE') {
