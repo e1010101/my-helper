@@ -223,7 +223,7 @@ export class Bot {
       } catch (error: any) {
         if (error.response?.error_code === 429) {
           logger.warn(`Rate limited during createWebhook, using dummy callback. The webhook from previous registration should still work.`);
-          webhookCallback = (req, res) => {
+          webhookCallback = (_req, res) => {
             logger.warn('Received webhook request but callback not fully initialized due to rate limits.');
             res.writeHead(200);
             res.end();
