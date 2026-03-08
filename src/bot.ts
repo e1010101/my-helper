@@ -217,7 +217,21 @@ export class Bot {
       }
 
       // Get Telegraf's webhook callback
-      const webhookCallback = await this.bot.createWebhook({ domain, path: '/webhook' });
+      let webhookCallback: (req: IncomingMessage, res: ServerResponse) => void;
+      try {
+        webhookCallback = await this.bot.createWebhook({ domain, path: '/webhook' });
+      } catch (error: any) {
+        if (error.response?.error_code === 429) {
+          logger.warn(`Rate limited during createWebhook, using dummy callback. The webhook from previous registration should still work.`);
+          webhookCallback = (req, res) => {
+            logger.warn('Received webhook request but callback not fully initialized due to rate limits.');
+            res.writeHead(200);
+            res.end();
+          };
+        } else {
+          throw error;
+        }
+      }
 
       // Create HTTP server that handles both webhook and health
       const webhookServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
