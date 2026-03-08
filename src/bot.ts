@@ -137,6 +137,13 @@ export class Bot {
   private setupHealthEndpoint() {
     // Create HTTP server for health checks (works in both polling and webhook modes)
     this.httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+      // Lightweight liveness probe for Railway health check
+      if (req.url === '/' && req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok' }));
+        return;
+      }
+
       // Health check endpoint
       if (req.url === '/health' && req.method === 'GET') {
         try {
@@ -267,7 +274,7 @@ export class Bot {
     } else {
       // Polling mode (for development)
       // Start standalone HTTP server for health checks
-      const port = 3000;
+      const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
       await new Promise<void>((resolve) => {
         this.httpServer?.listen(port, () => {
           logger.info(`Health endpoint listening on port ${port}`);
