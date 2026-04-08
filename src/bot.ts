@@ -75,7 +75,7 @@ export class Bot {
           return;
         }
 
-        // It's a regular text message, let's pass it to Gemini
+        // It's a regular text message, let's pass it to the AI model
         try {
           logger.info(`Passing text to AI service for userId ${userId}`);
           await ctx.sendChatAction('typing');
@@ -88,6 +88,37 @@ export class Bot {
         }
       }
       await next();
+    });
+
+    // ── Feedback buttons for /ask replies ────────────────────────────
+    this.bot.action(/^ask_feedback:(thumbs_up|thumbs_down)$/, async (ctx) => {
+      const userId = ctx.from?.id;
+      const match = (ctx as any).match as RegExpExecArray | undefined;
+      const feedbackType = match?.[1] as 'thumbs_up' | 'thumbs_down' | undefined;
+      const messageId = ctx.callbackQuery?.message?.message_id;
+
+      if (!userId || !feedbackType || !messageId) {
+        await ctx.answerCbQuery();
+        return;
+      }
+
+      try {
+        await db.saveAiFeedback(userId, messageId, feedbackType);
+        const emoji = feedbackType === 'thumbs_up' ? '👍' : '👎';
+        await ctx.answerCbQuery(`${emoji} Thanks for your feedback!`);
+
+        // Remove the keyboard after feedback is given
+        try {
+          if (ctx.callbackQuery.message && 'text' in ctx.callbackQuery.message) {
+            await ctx.editMessageReplyMarkup(undefined);
+          }
+        } catch {
+          // Ignore if message can't be edited
+        }
+      } catch (error) {
+        logger.error('Error saving AI feedback', error);
+        await ctx.answerCbQuery('Failed to save feedback', { show_alert: true });
+      }
     });
   }
 
@@ -106,6 +137,13 @@ export class Bot {
   private setupHealthEndpoint() {
     // Create HTTP server for health checks (works in both polling and webhook modes)
     this.httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+      // Lightweight liveness probe for Railway health check
+      if (req.url === '/' && req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok' }));
+        return;
+      }
+
       // Health check endpoint
       if (req.url === '/health' && req.method === 'GET') {
         try {
@@ -133,6 +171,19 @@ export class Bot {
   }
 
   async start() {
+    // Register commands with Telegram so they appear in the autocomplete menu
+    await this.bot.telegram.setMyCommands([
+      { command: 'start', description: 'Start the bot and see welcome message' },
+      { command: 'help', description: 'Show available commands' },
+      { command: 'ping', description: 'Check if the bot is responsive' },
+      { command: 'task', description: 'Create or manage tasks (-create, -read, -update, -delete)' },
+      { command: 'tasks', description: 'List your saved tasks' },
+      { command: 'prompt', description: 'Create and save a new prompt template' },
+      { command: 'getprompt', description: 'Retrieve saved prompts (-title, -tag)' },
+      { command: 'ask', description: 'Ask an intelligent question (AI agent)' },
+    ]);
+    logger.info('Bot commands registered with Telegram');
+
     if (config.webhook) {
       // Webhook mode (for production)
       // Create custom HTTP server that handles both webhook and health endpoint
@@ -166,11 +217,32 @@ export class Bot {
       }
 
       // Get Telegraf's webhook callback
-      const webhookCallback = await this.bot.createWebhook({ domain, path: '/webhook' });
+      let webhookCallback: (req: IncomingMessage, res: ServerResponse) => void;
+      try {
+        webhookCallback = await this.bot.createWebhook({ domain, path: '/webhook' });
+      } catch (error: any) {
+        if (error.response?.error_code === 429) {
+          logger.warn(`Rate limited during createWebhook, using dummy callback. The webhook from previous registration should still work.`);
+          webhookCallback = (_req, res) => {
+            logger.warn('Received webhook request but callback not fully initialized due to rate limits.');
+            res.writeHead(200);
+            res.end();
+          };
+        } else {
+          throw error;
+        }
+      }
 
       // Create HTTP server that handles both webhook and health
       const webhookServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-        // Health check endpoint
+        // Lightweight liveness probe for Railway health check
+        if (req.url === '/' && req.method === 'GET') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'ok' }));
+          return;
+        }
+
+        // Deep health check endpoint (for admin/monitoring)
         if (req.url === '/health' && req.method === 'GET') {
           try {
             const health = await this.healthService.getHealthStatus();
@@ -199,8 +271,8 @@ export class Bot {
 
       // Start the webhook server
       await new Promise<void>((resolve) => {
-        webhookServer.listen(port, () => {
-          logger.info(`Webhook server listening on port ${port}`);
+        webhookServer.listen(port, '0.0.0.0', () => {
+          logger.info(`Webhook server listening on port ${port} at 0.0.0.0`);
           resolve();
         });
       });
@@ -216,11 +288,19 @@ export class Bot {
     } else {
       // Polling mode (for development)
       // Start standalone HTTP server for health checks
-      const port = 3000;
+      const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
       await new Promise<void>((resolve) => {
-        this.httpServer?.listen(port, () => {
-          logger.info(`Health endpoint listening on port ${port}`);
+        this.httpServer?.listen(port, '0.0.0.0', () => {
+          logger.info(`Health endpoint listening on port ${port} at 0.0.0.0`);
           resolve();
+        }).on('error', (err: any) => {
+          if (err.code === 'EADDRINUSE') {
+            logger.warn(`Port ${port} is already in use by another instance. Health endpoint disabled for this run.`);
+            resolve();
+          } else {
+            logger.error('Health endpoint error', err);
+            resolve(); // Don't crash the bot if the side-server fails
+          }
         });
       });
 
