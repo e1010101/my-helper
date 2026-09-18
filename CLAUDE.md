@@ -38,6 +38,7 @@ A powerful, extensible Telegram bot built with TypeScript, designed for personal
 - `npm run lint` - Run ESLint over `src`, `scripts` and `tests`
 - `npm run type-check` - Type check everything without emitting (`tsconfig.check.json`)
 - `npm test` - Run the `node:test` suites under `tests/`
+- `npm run db:migrate` - Apply `docs/database-schema.sql` via `psql` (needs `DATABASE_URL`)
 - `npm run webhook:info|delete|set` - Inspect or change the Telegram webhook
 
 ## Architecture
@@ -151,8 +152,19 @@ so a missing table makes `/health` report `unhealthy`.
 
 `conversations`, `facts`, `reminders`, `pending_actions` and `credentials` have Row
 Level Security enabled with only a `service_role` policy. **The bot must run with
-`SUPABASE_SERVICE_ROLE_KEY`**; with the anon key those queries fail and `/health` reports
-the RLS hint. Never ship that key to a client.
+`SUPABASE_SERVICE_ROLE_KEY`**; never ship that key to a client.
+
+Two important consequences:
+
+- Reading an RLS-protected table with the wrong key does **not** error, it returns zero
+  rows. That is why the health check performs a write probe rather than a SELECT when
+  deciding whether the database is usable.
+- The policy block in the schema is skipped when `service_role` does not exist, so the
+  file also applies cleanly to a plain Postgres instance (useful for testing).
+
+`docs/database-schema.sql` is applied with `npm run db:migrate` (psql; PostgREST cannot
+execute DDL such as `DO` blocks or `ENABLE ROW LEVEL SECURITY`). It is written to be
+re-runnable.
 
 ### Adding New Commands
 

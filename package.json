@@ -13,7 +13,8 @@
     "test": "node --import tsx --test tests/*.test.ts",
     "webhook:info": "tsx scripts/webhook-manager.ts info",
     "webhook:delete": "tsx scripts/webhook-manager.ts delete",
-    "webhook:set": "tsx scripts/webhook-manager.ts set"
+    "webhook:set": "tsx scripts/webhook-manager.ts set",
+    "db:migrate": "tsx scripts/db-migrate.ts"
   },
   "keywords": [
     "telegram",

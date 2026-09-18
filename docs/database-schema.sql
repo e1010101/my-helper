@@ -216,13 +216,26 @@ DO $$
 DECLARE
   target TEXT;
 BEGIN
+  -- The service_role is created by Supabase. A plain Postgres instance (used
+  -- for local testing) will not have it, so skip policy creation there rather
+  -- than failing the whole migration. On Supabase, service_role also carries
+  -- BYPASSRLS, so these policies are belt-and-braces documentation of intent.
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+    RAISE NOTICE 'role service_role not found; skipping RLS policies (expected outside Supabase)';
+    RETURN;
+  END IF;
+
   FOREACH target IN ARRAY ARRAY['conversations', 'facts', 'reminders', 'pending_actions', 'credentials']
   LOOP
-    EXECUTE format('DROP POLICY IF EXISTS %I ON %I', 'service_role_full_access', target);
-    EXECUTE format(
-      'CREATE POLICY %I ON %I FOR ALL TO service_role USING (true) WITH CHECK (true)',
-      'service_role_full_access', target
-    );
+    -- CREATE POLICY has no IF NOT EXISTS, so a duplicate is swallowed by name.
+    -- That keeps this file safe to re-run, which matters because it is applied
+    -- as a whole script.
+    BEGIN
+      EXECUTE format('CREATE POLICY %I ON %I FOR ALL TO service_role USING (true) WITH CHECK (true)',
+        'service_role_full_access', target);
+    EXCEPTION WHEN duplicate_object THEN
+      NULL;
+    END;
   END LOOP;
 END $$;
 

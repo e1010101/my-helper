@@ -322,6 +322,15 @@ The bot requires these Supabase tables:
 Run the SQL from `docs/database-schema.sql` in your Supabase SQL Editor to create these tables.
 The health endpoint reports `unhealthy` if any of them is missing.
 
+Or apply it from the command line (needs `psql` on PATH and `DATABASE_URL` in `.env`):
+
+```bash
+npm run db:migrate
+```
+
+The script applies the schema, then prints per-table status including which tables have
+Row Level Security enabled, so you can confirm the migration took effect.
+
 **Row Level Security:** `conversations`, `facts`, `reminders`, `pending_actions` and
 `credentials` have RLS enabled with only a `service_role` policy, so they are unreadable
 with the public key. Set `SUPABASE_SERVICE_ROLE_KEY` or the assistant features will fail —
