@@ -1,4 +1,6 @@
 import { Context } from 'telegraf';
+import { db } from '../services/database.js';
+import { escapeHtml } from '../utils/telegram-format.js';
 
 type PromptField = 'title' | 'prompt' | 'tags' | 'image';
 
@@ -11,10 +13,17 @@ interface PromptDraft {
     step: PromptField;
 }
 
+/** One in-progress draft per user, so a form never bleeds across users. */
 const promptDrafts = new Map<number, PromptDraft>();
 
 export function isUserInPromptFlow(userId: number): boolean {
     return promptDrafts.has(userId);
+}
+
+function resetDraft(userId: number, chatId: number): PromptDraft {
+    const draft: PromptDraft = { chatId, step: 'title' };
+    promptDrafts.set(userId, draft);
+    return draft;
 }
 
 export async function promptCommand(ctx: Context) {
@@ -26,20 +35,21 @@ export async function promptCommand(ctx: Context) {
         return;
     }
 
-    // Initialize a new draft and set the step to 'title'
-    const draft: PromptDraft = {
-        chatId,
-        step: 'title'
-    };
-    promptDrafts.set(userId, draft);
+    // Starting over discards any half-finished draft.
+    const discarded = promptDrafts.delete(userId);
+    resetDraft(userId, chatId);
+
+    const restartNote = discarded
+        ? '\n\n_Your previous unfinished prompt draft was discarded._'
+        : '';
 
     await ctx.reply(
-        "📝 Let's create a new prompt template.\nPlease send me the **Title** for this prompt.",
-        { parse_mode: 'Markdown' }
+        `📝 Let's create a new prompt template.\nPlease send me the <b>Title</b> for this prompt.${restartNote}`,
+        { parse_mode: 'HTML' }
     );
 }
 
-export async function promptTextInputHandler(ctx: Context) {
+export async function promptTextInputHandler(ctx: Context): Promise<boolean> {
     const userId = ctx.from?.id;
     const text = ctx.message && 'text' in ctx.message ? ctx.message.text.trim() : '';
 
@@ -56,15 +66,19 @@ export async function promptTextInputHandler(ctx: Context) {
         draft.title = text;
         draft.step = 'prompt';
         promptDrafts.set(userId, draft);
-        await ctx.reply("Great! Now, send me the **Prompt text**.", { parse_mode: 'Markdown' });
+        await ctx.reply('Great! Now, send me the <b>Prompt text</b>.', { parse_mode: 'HTML' });
         return true; // Handled
-    } else if (draft.step === 'prompt') {
+    }
+
+    if (draft.step === 'prompt') {
         draft.promptText = text;
         draft.step = 'tags';
         promptDrafts.set(userId, draft);
-        await ctx.reply("Got it. Send me comma-separated **Tags** for this prompt (e.g., coding, writing), or send 'skip'.", { parse_mode: 'Markdown' });
+        await ctx.reply("Got it. Send me comma-separated <b>Tags</b> for this prompt (e.g., coding, writing), or send 'skip'.", { parse_mode: 'HTML' });
         return true; // Handled
-    } else if (draft.step === 'tags') {
+    }
+
+    if (draft.step === 'tags') {
         if (text.toLowerCase() === 'skip') {
             draft.tags = [];
         } else {
@@ -72,14 +86,21 @@ export async function promptTextInputHandler(ctx: Context) {
         }
         draft.step = 'image';
         promptDrafts.set(userId, draft);
-        await ctx.reply("Almost done. Please send an **Image** to associate with this prompt. It will be stored in full resolution.", { parse_mode: 'Markdown' });
+        await ctx.reply('Almost done. Please send an <b>Image</b> to associate with this prompt. It will be stored in full resolution.', { parse_mode: 'HTML' });
         return true; // Handled
     }
 
-    return false;
+    // The draft is waiting for an image. Without this branch the draft would
+    // live forever, silently swallowing every later message from this user, so
+    // instead we treat the text as an explicit abort.
+    promptDrafts.delete(userId);
+    await ctx.reply(
+        '🚫 Prompt creation cancelled because no image was sent. Use /prompt to start again.'
+    );
+    return true;
 }
 
-export async function promptPhotoInputHandler(ctx: Context) {
+export async function promptPhotoInputHandler(ctx: Context): Promise<boolean> {
     const userId = ctx.from?.id;
     const photo = ctx.message && 'photo' in ctx.message ? ctx.message.photo : null;
 
@@ -103,13 +124,13 @@ export async function promptPhotoInputHandler(ctx: Context) {
     }
 
     try {
-        const { db } = await import('../services/database.js');
         await db.savePrompt(userId, draft.title, draft.promptText, draft.tags || [], draft.imageFileId);
 
         promptDrafts.delete(userId);
-        await ctx.reply(`✅ Prompt '${draft.title}' saved successfully!`);
+        await ctx.reply(`✅ Prompt '${escapeHtml(draft.title)}' saved successfully!`, { parse_mode: 'HTML' });
     } catch (error) {
         console.error('Error saving prompt to database:', error);
+        // Keep the draft so the user can simply resend the photo and retry.
         await ctx.reply('❌ Failed to save prompt. Please try again later.');
     }
 

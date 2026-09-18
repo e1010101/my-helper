@@ -1,40 +1,58 @@
 import { Context, Markup } from 'telegraf';
-
-interface PromptSearchResult {
-    id: number;
-    title: string;
-    prompt: string;
-    tags: string[];
-    image_file_id: string;
-    created_at: string;
-    updated_at: string;
-}
+import { db, Prompt } from '../services/database.js';
+import { escapeHtml } from '../utils/telegram-format.js';
 
 interface PromptPaginationState {
     chatId: number;
     messageId: number;
-    results: PromptSearchResult[];
+    results: Prompt[];
     currentIndex: number;
 }
 
 const paginationStates = new Map<number, PromptPaginationState>();
 
-function parseGetPromptArgs(text: string): { titleQuery?: string; tagsQuery?: string[] } {
-    const args = text.split(' ').slice(1).join(' '); // Remove '/getprompt'
-    const titleMatch = args.match(/-title\s+([^-]+)(?=\s+-|$)/i);
-    const tagMatch = args.match(/-tag\s+([^-]+)(?=\s+-|$)/i);
+/** Telegram allows at most 1024 characters in a photo caption. */
+const MAX_CAPTION_LENGTH = 1024;
 
-    const titleQuery = titleMatch ? titleMatch[1].trim() : undefined;
-    let tagsQuery: string[] | undefined;
+interface SearchArgs {
+    titleQuery?: string;
+    tagsQuery?: string[];
+}
 
-    if (tagMatch) {
-        tagsQuery = tagMatch[1]
-            .split(',')
-            .map(tag => tag.trim())
-            .filter(tag => tag.length > 0);
+/**
+ * Parses `/getprompt -title <text> -tag <a,b>`.
+ *
+ * Values are read up to the next known flag rather than up to the next hyphen,
+ * so values containing hyphens ("my-prompt", "gpt-4") are kept intact.
+ */
+export function parseGetPromptArgs(text: string): SearchArgs {
+    const args = text.split(' ').slice(1).join(' ').trim();
+    const parsed: SearchArgs = {};
+
+    const flagPattern = /-(title|tag)\b/gi;
+    const matches = [...args.matchAll(flagPattern)];
+
+    for (let i = 0; i < matches.length; i++) {
+        const flag = matches[i][1].toLowerCase();
+        const valueStart = (matches[i].index ?? 0) + matches[i][0].length;
+        const valueEnd = i + 1 < matches.length ? matches[i + 1].index : args.length;
+        const value = args.slice(valueStart, valueEnd).trim();
+
+        if (!value) {
+            continue;
+        }
+
+        if (flag === 'title') {
+            parsed.titleQuery = value;
+        } else {
+            parsed.tagsQuery = value
+                .split(',')
+                .map(tag => tag.trim())
+                .filter(tag => tag.length > 0);
+        }
     }
 
-    return { titleQuery, tagsQuery };
+    return parsed;
 }
 
 function getPaginationKeyboard(currentIndex: number, total: number) {
@@ -48,12 +66,27 @@ function getPaginationKeyboard(currentIndex: number, total: number) {
     return Markup.inlineKeyboard([buttons]);
 }
 
-function formatPromptCaption(prompt: PromptSearchResult, currentIndex: number, total: number): string {
-    const tagsStr = prompt.tags && prompt.tags.length > 0 ? prompt.tags.join(', ') : 'None';
-    return `📄 *Result ${currentIndex + 1} of ${total}*\n\n` +
-        `*Title:* ${prompt.title}\n` +
-        `*Tags:* ${tagsStr}\n\n` +
-        `*Prompt Text:*\n${prompt.prompt}`;
+function formatPromptCaption(prompt: Prompt, currentIndex: number, total: number): string {
+    const tagsStr = prompt.tags && prompt.tags.length > 0
+        ? prompt.tags.map(escapeHtml).join(', ')
+        : 'None';
+
+    const header = `📄 <b>Result ${currentIndex + 1} of ${total}</b>\n\n` +
+        `<b>Title:</b> ${escapeHtml(prompt.title)}\n` +
+        `<b>Tags:</b> ${tagsStr}\n\n` +
+        `<b>Prompt Text:</b>\n`;
+
+    const body = escapeHtml(prompt.prompt ?? '');
+    const full = header + body;
+
+    // Long prompts would otherwise make Telegram reject the whole caption.
+    if (full.length <= MAX_CAPTION_LENGTH) {
+        return full;
+    }
+
+    const overflowNotice = '\n\n<i>(truncated — prompt is too long for a caption)</i>';
+    const available = MAX_CAPTION_LENGTH - header.length - overflowNotice.length;
+    return header + body.slice(0, Math.max(available, 0)) + overflowNotice;
 }
 
 export async function getPromptCommand(ctx: Context) {
@@ -70,14 +103,16 @@ export async function getPromptCommand(ctx: Context) {
 
     if (!titleQuery && (!tagsQuery || tagsQuery.length === 0)) {
         await ctx.reply(
-            '❌ Please provide search criteria. Usage:\n`/getprompt -title <text>`\n`/getprompt -tag <tag1,tag2>`\n`/getprompt -title <text> -tag <tag1,tag2>`',
-            { parse_mode: 'Markdown' }
+            '❌ Please provide search criteria. Usage:\n' +
+            '<code>/getprompt -title &lt;text&gt;</code>\n' +
+            '<code>/getprompt -tag &lt;tag1,tag2&gt;</code>\n' +
+            '<code>/getprompt -title &lt;text&gt; -tag &lt;tag1,tag2&gt;</code>',
+            { parse_mode: 'HTML' }
         );
         return;
     }
 
     try {
-        const { db } = await import('../services/database.js');
         await ctx.sendChatAction('typing');
         const results = await db.searchPrompts(userId, titleQuery, tagsQuery);
 
@@ -92,7 +127,7 @@ export async function getPromptCommand(ctx: Context) {
 
         const sentMessage = await ctx.replyWithPhoto(firstResult.image_file_id, {
             caption,
-            parse_mode: 'Markdown',
+            parse_mode: 'HTML',
             reply_markup: results.length > 1 ? keyboard.reply_markup : undefined,
         });
 
@@ -135,8 +170,13 @@ export async function getPromptActionHandler(ctx: Context) {
         return;
     }
 
-    state.currentIndex = newIndex;
     const currentResult = state.results[newIndex];
+    if (!currentResult) {
+        await ctx.answerCbQuery('That result is no longer available.', { show_alert: true });
+        return;
+    }
+
+    state.currentIndex = newIndex;
     const caption = formatPromptCaption(currentResult, newIndex, state.results.length);
     const keyboard = getPaginationKeyboard(newIndex, state.results.length);
 
@@ -149,7 +189,7 @@ export async function getPromptActionHandler(ctx: Context) {
                 type: 'photo',
                 media: currentResult.image_file_id,
                 caption,
-                parse_mode: 'Markdown',
+                parse_mode: 'HTML',
             },
             {
                 reply_markup: keyboard.reply_markup,

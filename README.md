@@ -5,7 +5,12 @@ A powerful, extensible Telegram bot for personal assistance, built with TypeScri
 ## ✨ Features
 
 - 🔐 **Secure** - User-specific data storage with Supabase
-- 📝 **Task Capture** - Create and persist to-do tasks
+- 🧠 **Persistent memory** - Conversations, facts and reminders live in Postgres, not RAM
+- ⏰ **Reminders** - "remind me in 30 minutes", "every Monday at 9am", with timezone-correct scheduling
+- 🤝 **Confirm-before-write** - The assistant proposes actions; nothing changes your data until you tap Confirm
+- 📝 **Task Capture** - Create, edit and persist to-do tasks
+- 💬 **AI Chat** - Free-form messages are answered by Gemini, with tools for your own data
+- 📄 **Prompt Library** - Save prompt templates with tags and an image, then search them
 - 🚀 **Fast** - Built with Telegraf, one of the fastest Telegram bot frameworks
 - 🔧 **Extensible** - Easy-to-add command system
 - 📊 **Analytics** - Command usage tracking and statistics
@@ -20,6 +25,7 @@ A powerful, extensible Telegram bot for personal assistance, built with TypeScri
 - **Language:** TypeScript
 - **Bot Framework:** [Telegraf](https://telegraf.js.org/)
 - **Database:** [Supabase](https://supabase.com/) (PostgreSQL)
+- **AI:** [Google Gemini](https://ai.google.dev/) (`gemini-2.5-flash`) via `@google/genai`
 - **Hosting:** [Railway.app](https://railway.app/) (recommended, free tier available)
 - **Runtime:** Node.js 18+
 
@@ -78,30 +84,59 @@ npm start
 - `/start` - Welcome message and introduction
 - `/help` - List all available commands
 - `/ping` - Check bot responsiveness
-- `/task` - Open task form (Name + Description + Submit)
+- `/task` - Manage to-do tasks (see [`/task` Usage](#task-usage))
 - `/tasks` - List your saved tasks
+- `/prompt` - Create a prompt template (title, text, tags, image)
+- `/getprompt` - Search your saved prompts
+- `/forget` - Clear conversation memory (facts and reminders survive)
+- `/memory` - Show the facts, reminders and message count the assistant holds
 
-**Admin Commands:**
+**Admin Commands** (requires `ADMIN_USER_ID`):
 - `/status` - Check bot health, uptime, and system status
 - `/stats` - View usage statistics and top commands
 
+### Talking to the assistant
+
+Any plain text message is handled by Gemini, which can call tools against your own data:
+
+| You say | What happens |
+| --- | --- |
+| "what time is it?" | Read tool runs immediately |
+| "remember I'm allergic to peanuts" | Proposes `save_fact`, waits for your Confirm tap |
+| "remind me to call mum tomorrow at 7:30am" | Proposes `create_reminder`, then schedules it |
+| "what do you remember about me?" | Reads back facts and reminders |
+
+**Nothing that writes your data happens without an explicit Confirm tap.** Read-only
+questions are answered directly. Confirmations expire after 10 minutes.
+
+Reminders are stored in Postgres and polled by a scheduler, so they survive restarts;
+a reminder that came due while the bot was offline is delivered marked "(missed earlier)".
+
 ### `/task` Usage
 
-1. Send `/task` or `/task -create`
+`/task` always takes a flag:
+
+| Command | Effect |
+| --- | --- |
+| `/task -create` | Opens the interactive form to create a task |
+| `/task -read <id>` | Shows full details of one task |
+| `/task -read all` | Lists all your tasks (same as `/tasks`) |
+| `/task -update <id>` | Opens the form pre-filled with that task |
+| `/task -delete <id>` | Deletes that task |
+
+Running `/task` with no flag prints the usage summary.
+
+Form flow:
+
+1. Send `/task -create`
 2. Tap `Name`, then send the task name as your next message
 3. Tap `Description`, then send the description as your next message
 4. Tap `Submit` to save the task
 
-**CRUD Operations:**
-You can manage specific tasks using their ID (find the ID via `/tasks`):
-- `/task -read <id>`: View full details of a task (or `-read all` to list all tasks)
-- `/task -update <id>`: Opens the interactive form to edit an existing task
-- `/task -delete <id>`: Deletes the task from your list
-
 Expected behavior:
 - The bot keeps one in-progress task draft per user while filling the form.
 - `Submit` is blocked until both `Name` and `Description` are provided.
-- On success, the bot confirms with `✅ Task saved!` and persists the task in the `tasks` table.
+- On success, the bot confirms with `✅ Task created!` and persists the task in the `tasks` table.
 - If saving fails, the bot responds with an error and keeps the draft so you can retry.
 
 ### `/tasks` Usage
@@ -109,6 +144,29 @@ Expected behavior:
 1. Send `/tasks`
 2. Bot returns your most recent saved tasks (up to 20), newest first
 3. Use the inline keyboard buttons (e.g., `[1]`, `[2]`) below the message to toggle tasks as completed (✅) or uncompleted (⬜)
+
+### `/prompt` Usage
+
+1. Send `/prompt`
+2. Send the **title** as your next message
+3. Send the **prompt text**
+4. Send comma-separated **tags**, or `skip`
+5. Send an **image** — the highest available resolution is stored (as a Telegram `file_id`)
+
+Sending text instead of an image at the last step cancels the draft, so a half-finished
+prompt never traps your later messages.
+
+### `/getprompt` Usage
+
+```text
+/getprompt -title <text>
+/getprompt -tag <tag1,tag2>
+/getprompt -title <text> -tag <tag1,tag2>
+```
+
+Title search is a case-insensitive substring match; tag search requires all given tags
+(PostgreSQL array containment). Results are shown one per photo with `⬅️ Previous` /
+`Next ➡️` pagination.
 
 ## 🛠️ Development
 
@@ -118,20 +176,53 @@ Expected behavior:
 my-helper/
 ├── src/
 │   ├── config/
-│   │   └── env.ts           # Environment configuration
+│   │   └── env.ts              # Lazy environment configuration
 │   ├── services/
-│   │   └── database.ts      # Database operations
+│   │   ├── database.ts         # Task/prompt database operations
+│   │   ├── assistant-store.ts  # AssistantStore interface (+ Clock)
+│   │   ├── supabase-assistant-store.ts   # Postgres-backed memory/facts/reminders
+│   │   ├── in-memory-assistant-store.ts  # Test/fallback implementation
+│   │   ├── assistant.ts        # Conversation loop + tool confirmations
+│   │   ├── gemini-client.ts    # Gemini API wrapper (AIClient interface)
+│   │   ├── reminder-time.ts    # Timezone maths + natural-language time parsing
+│   │   ├── reminder-scheduler.ts # Polls and delivers due reminders
+│   │   ├── health.ts           # Health snapshot for /health and /status
+│   │   └── logger.ts           # Leveled console logger
+│   ├── tools/
+│   │   ├── registry.ts         # Tool registry + argument validation
+│   │   └── builtin-tools.ts    # The tools the model may call
 │   ├── commands/
-│   │   └── index.ts         # Command handlers
-│   ├── bot.ts               # Bot setup and middleware
-│   └── index.ts             # Entry point
+│   │   ├── index.ts            # Core command handlers
+│   │   ├── assistant-commands.ts # /forget, /memory
+│   │   ├── prompt.ts           # /prompt creation flow
+│   │   └── getprompt.ts        # /getprompt search + pagination
+│   ├── types/
+│   │   └── assistant.ts        # Shared assistant data shapes
+│   ├── utils/
+│   │   └── telegram-format.ts  # HTML escaping + Markdown→Telegram HTML
+│   ├── bot.ts                  # Bot setup, middleware, HTTP server, wiring
+│   └── index.ts                # Entry point
+├── scripts/
+│   └── webhook-manager.ts      # Telegram webhook CLI
+├── tests/                      # node:test suites (npm test)
 ├── docs/
-│   ├── database-schema.sql  # Supabase table definitions
-│   └── deployment.md        # Deployment guides
-├── .env.example             # Environment template
+│   ├── database-schema.sql     # Supabase table definitions
+│   └── deployment.md           # Deployment guides
+├── .env.example                # Environment template
 ├── package.json
-└── tsconfig.json
+├── tsconfig.json               # Build config (emits to dist/)
+└── tsconfig.check.json         # Type-check config (src + scripts + tests, no emit)
 ```
+
+### Tests
+
+```bash
+npm test          # node:test suites under tests/
+```
+
+The assistant layer is built around interfaces (`AssistantStore`, `AIClient`,
+`ToolRegistry`) with in-memory implementations, so the reminder scheduler, the tool
+loop and the time maths are all tested without a live database, Telegram or Gemini.
 
 ### Adding New Commands
 
@@ -159,6 +250,7 @@ npm run dev         # Start with hot reload
 npm run build       # Compile TypeScript
 npm run lint        # Run ESLint
 npm run type-check  # Type check without building
+npm test            # Run the test suites
 ```
 
 ## 🌐 Deployment
@@ -175,13 +267,17 @@ Railway offers a generous free tier perfect for personal bots.
    - `TELEGRAM_BOT_TOKEN`
    - `SUPABASE_URL`
    - `SUPABASE_ANON_KEY`
+   - `GEMINI_API_KEY`
    - `NODE_ENV=production`
+   - `ADMIN_USER_ID` (your Telegram user ID from @userinfobot)
 6. Railway will automatically deploy your bot
 
-For webhook mode (more efficient):
+For webhook mode (more efficient than polling):
 - Add `WEBHOOK_DOMAIN` (your Railway domain, e.g., `mybot.railway.app`)
-- Add `WEBHOOK_PORT=3000`
-- Add `ADMIN_USER_ID` (your Telegram user ID from @userinfobot)
+- Add `WEBHOOK_SECRET` (any random `A-Za-z0-9_-` string) so only Telegram can post to `/webhook`
+
+Do **not** set the port yourself: Railway injects `PORT`, and the bot prefers it over
+`WEBHOOK_PORT`. The HTTP server binds to `0.0.0.0` so platform healthchecks can reach it.
 
 **📖 Deployment Guides:**
 - **Quick start:** [DEPLOY.md](DEPLOY.md) - 15-minute deployment guide
@@ -193,8 +289,9 @@ For webhook mode (more efficient):
 The bot includes comprehensive monitoring features:
 
 ### Health Endpoint
-- **URL:** `https://your-domain.railway.app/health`
+- **URL:** `https://your-domain.railway.app/health` (the bare `/` responds too)
 - Returns JSON with bot status, uptime, memory usage, and database connectivity
+- Reports `unhealthy` (HTTP 503) if the Telegram API or any required table is unreachable
 - Use with UptimeRobot or Better Uptime for 24/7 monitoring
 
 ### Admin Commands
@@ -210,13 +307,25 @@ The bot includes comprehensive monitoring features:
 
 ## 💾 Database Schema
 
-The bot requires three Supabase tables:
+The bot requires these Supabase tables:
 
 - `user_data` - Stores user-specific key-value data
 - `command_history` - Logs command usage for analytics
 - `tasks` - Stores to-do tasks created from `/task`
+- `prompts` - Stores prompt templates (`title`, `prompt`, `tags`, `image_file_id`) from `/prompt`
+- `conversations` - Assistant conversation memory
+- `facts` - Long-lived facts and preferences
+- `reminders` - Scheduled reminders
+- `pending_actions` - Write-tool confirmations awaiting a tap
+- `credentials` - Provider tokens (service_role only)
 
 Run the SQL from `docs/database-schema.sql` in your Supabase SQL Editor to create these tables.
+The health endpoint reports `unhealthy` if any of them is missing.
+
+**Row Level Security:** `conversations`, `facts`, `reminders`, `pending_actions` and
+`credentials` have RLS enabled with only a `service_role` policy, so they are unreadable
+with the public key. Set `SUPABASE_SERVICE_ROLE_KEY` or the assistant features will fail —
+`/health` will tell you exactly that.
 
 ## 🔒 Security
 

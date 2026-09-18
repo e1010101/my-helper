@@ -8,14 +8,12 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "lint": "eslint src --ext .ts",
-    "type-check": "tsc --noEmit",
+    "lint": "eslint src scripts tests --ext .ts",
+    "type-check": "tsc -p tsconfig.check.json",
+    "test": "node --import tsx --test tests/*.test.ts",
     "webhook:info": "tsx scripts/webhook-manager.ts info",
     "webhook:delete": "tsx scripts/webhook-manager.ts delete",
-    "webhook:set": "tsx scripts/webhook-manager.ts set",
-    "codex:notify": "tsx scripts/codex-notify-bridge.ts",
-    "codex:notify:daemon": "tsx scripts/codex-notify-bridge.ts --daemon",
-    "codex:notify:install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-codex-notify.ps1"
+    "webhook:set": "tsx scripts/webhook-manager.ts set"
   },
   "keywords": [
     "telegram",

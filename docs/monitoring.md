@@ -37,6 +37,9 @@ This guide explains how to deploy your bot for 24/7 operation and set up compreh
      ADMIN_USER_ID=your_telegram_user_id
      SUPABASE_URL=your_supabase_project_url
      SUPABASE_ANON_KEY=your_supabase_anon_key
+     SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
+     GEMINI_API_KEY=your_gemini_api_key
+     TIMEZONE=Asia/Singapore
      NODE_ENV=production
      ```
 
@@ -49,9 +52,11 @@ This guide explains how to deploy your bot for 24/7 operation and set up compreh
    - Add these additional variables:
      ```
      WEBHOOK_DOMAIN=my-helper-production.up.railway.app
-     WEBHOOK_PORT=3000
+     WEBHOOK_SECRET=some_long_random_a-z0-9_-_string
      ```
    - Redeploy (Railway will auto-redeploy on variable changes)
+   - Do not set a port manually — Railway injects `PORT` and the bot prefers it over
+     `WEBHOOK_PORT`.
 
 6. **Verify deployment:**
    - Check the **Deployments** tab for logs

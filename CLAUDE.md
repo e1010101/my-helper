@@ -4,12 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A powerful, extensible Telegram bot built with TypeScript, designed for personal use. The bot uses Telegraf framework for Telegram integration and Supabase for PostgreSQL database storage.
+A powerful, extensible Telegram bot built with TypeScript, designed for personal use. The bot uses the Telegraf framework for Telegram integration, Supabase for PostgreSQL storage, and Google Gemini for conversational replies.
 
 **Tech Stack:**
-- **Runtime:** Node.js (v18+) with TypeScript
+- **Runtime:** Node.js (v18+) with TypeScript (ESM — imports use `.js` extensions)
 - **Bot Framework:** Telegraf v4
 - **Database:** Supabase (PostgreSQL)
+- **AI:** Google Gemini (`gemini-2.5-flash`) via `@google/genai`
 - **Hosting:** Railway.app (recommended) or any Node.js hosting platform
 - **Development:** tsx for fast TypeScript execution with watch mode
 
@@ -18,17 +19,26 @@ A powerful, extensible Telegram bot built with TypeScript, designed for personal
 1. Install dependencies: `npm install`
 2. Copy `.env.example` to `.env` and configure:
    - `TELEGRAM_BOT_TOKEN`: Get from @BotFather on Telegram
-   - `SUPABASE_URL` and `SUPABASE_ANON_KEY`: From your Supabase project settings
+   - `SUPABASE_URL`, `SUPABASE_ANON_KEY`: From your Supabase project settings
+   - `SUPABASE_SERVICE_ROLE_KEY`: **Required** for assistant memory, facts, reminders
+     and confirmations — those tables have RLS enabled and only answer this key
+   - `GEMINI_API_KEY`: From Google AI Studio
+   - `ADMIN_USER_ID`: Your Telegram user ID (comma-separated list is supported; unset
+     means no admins, and reminders have no delivery destination)
+   - `TIMEZONE`: IANA name (e.g. `Asia/Singapore`) used for reminders and
+     "today"/"tomorrow" parsing; defaults to the host timezone
 3. Set up Supabase tables (see Database Schema section below)
 4. Run in development mode: `npm run dev`
 
 ## Common Commands
 
 - `npm run dev` - Start bot in development mode with hot reload
-- `npm run build` - Compile TypeScript to JavaScript
+- `npm run build` - Compile TypeScript to JavaScript (emits to `dist/`)
 - `npm start` - Run compiled bot (production)
-- `npm run lint` - Run ESLint
-- `npm run type-check` - Type check without emitting files
+- `npm run lint` - Run ESLint over `src`, `scripts` and `tests`
+- `npm run type-check` - Type check everything without emitting (`tsconfig.check.json`)
+- `npm test` - Run the `node:test` suites under `tests/`
+- `npm run webhook:info|delete|set` - Inspect or change the Telegram webhook
 
 ## Architecture
 
@@ -36,75 +46,136 @@ A powerful, extensible Telegram bot built with TypeScript, designed for personal
 ```
 src/
 ├── config/
-│   └── env.ts          # Environment configuration and validation
+│   └── env.ts              # Lazy environment access (reading config validates it)
 ├── services/
-│   └── database.ts     # Supabase client and database operations
+│   ├── database.ts         # Supabase client, task/prompt operations
+│   ├── assistant-store.ts  # AssistantStore interface + Clock
+│   ├── supabase-assistant-store.ts  # Postgres memory/facts/reminders/confirmations
+│   ├── in-memory-assistant-store.ts # In-memory store for tests and fallbacks
+│   ├── assistant.ts        # Conversation loop, tool dispatch, confirmations
+│   ├── gemini-client.ts    # AIClient interface + Gemini implementation
+│   ├── reminder-time.ts    # Timezone maths, recurrence, NL time parsing
+│   ├── reminder-scheduler.ts # Polls due reminders and delivers them
+│   ├── health.ts           # Health snapshot for /health and /status
+│   └── logger.ts           # Leveled console logger
+├── tools/
+│   ├── registry.ts         # Tool registry, classification, arg validation
+│   └── builtin-tools.ts    # Tools the model may call
 ├── commands/
-│   └── index.ts        # Bot command handlers (start, help, save, get, etc.)
-├── bot.ts              # Bot initialization, middleware, error handling
-└── index.ts            # Application entry point
+│   ├── index.ts            # Core commands, task form, admin commands
+│   ├── assistant-commands.ts # /forget, /memory
+│   ├── prompt.ts           # /prompt multi-step creation flow
+│   └── getprompt.ts        # /getprompt search and pagination
+├── types/
+│   └── assistant.ts        # Shared assistant data shapes
+├── utils/
+│   └── telegram-format.ts  # HTML escaping + Markdown→Telegram HTML
+├── bot.ts                  # Bot initialization, middleware, HTTP server, wiring
+└── index.ts                # Application entry point
 ```
 
 ### Key Components
 
 **Bot Initialization** ([src/bot.ts](src/bot.ts))
-- Sets up Telegraf bot instance
+- Sets up the Telegraf bot instance with `webhookReply: false`
 - Configures middleware for logging and command tracking
-- Registers command handlers
-- Supports both polling (dev) and webhook (production) modes
-- Handles graceful shutdown on SIGINT/SIGTERM
+- Wires the assistant: `SupabaseAssistantStore` → `AssistantService` (with the default
+  tool registry and `GeminiClient`) → `ReminderScheduler`
+- Routes non-command text to the assistant (skipped while a `/prompt` draft is active)
+- Serves `/health` (and `/`) plus `/webhook` from one HTTP server in both modes
+- Binds explicitly to `0.0.0.0` and prefers the platform-injected `PORT`
+- Starts the reminder scheduler only when `ADMIN_USER_ID` gives it a destination
+- Handles graceful shutdown on SIGINT/SIGTERM (scheduler, then HTTP server, then bot)
 
-**Command System** ([src/commands/index.ts](src/commands/index.ts))
-- Modular command registration
-- Built-in commands: `/start`, `/help`, `/ping`, `/task`, plus admin commands `/status`, `/stats`
-- Commands automatically log usage to database
-- Add new commands by creating handler functions and registering in `registerCommands()`
+**Assistant Loop** ([src/services/assistant.ts](src/services/assistant.ts))
+- Loads conversation history from the store, appends the new user message, then runs at
+  most `maxToolIterations` model passes
+- `kind: 'read'` tools execute inline; their output is fed back as a function response
+- The first `kind: 'write'` tool **stops the loop** and returns a `confirmation`, which
+  bot.ts renders as Confirm/Cancel buttons. Nothing is written until a tap
+- Confirmations are persisted with the originating model turn, expire after 10 minutes,
+  and are rejected if approved by a different user
+- Confirmed tools execute against the *original* request time, so "in 5 minutes" does not
+  drift by however long the confirmation took
+
+**Tool Registry** ([src/tools/registry.ts](src/tools/registry.ts))
+- A tool declares `parameters` as standard JSON Schema, sent via
+  `parametersJsonSchema` (the OpenAPI-flavoured `parameters` field wants UPPERCASE types)
+- `validateArguments` is the only gate between model output and side effects: it rejects
+  unknown keys, enforces required fields, coerces numerics and checks enums/bounds
+- Adding a capability means adding a `ToolDefinition` to `builtin-tools.ts`; mark
+  anything that mutates state as `kind: 'write'` so it inherits the confirmation flow
+
+**Reminders** ([src/services/reminder-time.ts](src/services/reminder-time.ts), [src/services/reminder-scheduler.ts](src/services/reminder-scheduler.ts))
+- Stored as an absolute `next_run_at` plus wall-clock columns (`time_of_day`,
+  `day_of_week`) so "every Monday 09:00" survives DST changes
+- `nextOccurrence` walks local days and resolves each candidate through
+  `instantFromWallClock` rather than adding fixed 24h steps
+- The scheduler polls every 30s; delivery is at-least-once (duplicate beats silence), and
+  a reminder recorded as sent is never sent twice for the same occurrence
+- Reminders missed while offline are delivered flagged `late`
 
 **Database Service** ([src/services/database.ts](src/services/database.ts))
-- Singleton Supabase client
-- Helper methods for common operations (saveUserData, getUserData, logCommand)
-- Error handling and logging
+- Singleton Supabase client; uses `SUPABASE_SERVICE_ROLE_KEY` when present
+- Task and prompt CRUD helpers; `getTask` returns `null` (not an error) when the row is absent
+
+### Testing
+
+`npm test` runs `node:test` suites in `tests/`. Everything time-, model- or
+database-dependent goes through an interface (`AssistantStore`, `AIClient`,
+`ToolRegistry`, `Clock`) with an in-memory or scripted implementation, so tests need no
+credentials or network. Keep it that way when adding features: if a new capability is
+hard to test, that is a sign it should take its dependency as a parameter.
+
+### Message Formatting
+
+Telegram rejects a whole message with a 400 "can't parse entities" error if
+user-supplied text contains parse-mode characters. Two rules follow:
+
+1. **Never interpolate raw user text** into a message sent with a `parse_mode`.
+   Wrap it in `escapeHtml()` from [src/utils/telegram-format.ts](src/utils/telegram-format.ts)
+   and send with `parse_mode: 'HTML'`.
+2. Gemini returns standard Markdown, which is **not** Telegram's dialect
+   (`**bold**`, headings and fenced code blocks do not render). Pass AI output
+   through `markdownToTelegramHtml()` before replying.
+
+Prefer `parse_mode: 'HTML'` for new code; the remaining legacy `Markdown` usages are
+static strings with no interpolation.
 
 ### Database Schema
 
-Required Supabase tables:
+Required Supabase tables (full DDL in [docs/database-schema.sql](docs/database-schema.sql)):
+`user_data`, `command_history`, `tasks`, `prompts`, `conversations`, `facts`,
+`reminders`, `pending_actions`, `credentials`. The health check queries the first seven,
+so a missing table makes `/health` report `unhealthy`.
 
-```sql
--- User data storage (key-value per user)
-CREATE TABLE user_data (
-  user_id BIGINT PRIMARY KEY,
-  data JSONB NOT NULL DEFAULT '{}'::jsonb,
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
--- Command usage history
-CREATE TABLE command_history (
-  id BIGSERIAL PRIMARY KEY,
-  user_id BIGINT NOT NULL,
-  command TEXT NOT NULL,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
--- Add indexes for better query performance
-CREATE INDEX idx_command_history_user_id ON command_history(user_id);
-CREATE INDEX idx_command_history_created_at ON command_history(created_at);
-```
+`conversations`, `facts`, `reminders`, `pending_actions` and `credentials` have Row
+Level Security enabled with only a `service_role` policy. **The bot must run with
+`SUPABASE_SERVICE_ROLE_KEY`**; with the anon key those queries fail and `/health` reports
+the RLS hint. Never ship that key to a client.
 
 ### Adding New Commands
 
-1. Create handler function in [src/commands/index.ts](src/commands/index.ts)
-2. Register in `registerCommands()` function
-3. Add to help text in `helpCommand()`
-4. Handler receives Telegraf `Context` object with user info and message data
+1. Create a handler function in [src/commands/index.ts](src/commands/index.ts)
+   (or a new file under `src/commands/` for a larger feature)
+2. Register it in `registerCommands()`
+3. Add it to the help text in `helpCommand()`
+4. Handlers receive a Telegraf `Context` object with user info and message data
 
 ### Deployment
 
 **Railway.app (Recommended):**
-1. Connect GitHub repository to Railway
-2. Add environment variables in Railway dashboard
+1. Connect the GitHub repository to Railway
+2. Add environment variables in the Railway dashboard (including `GEMINI_API_KEY`)
 3. Railway auto-detects Node.js and runs `npm start`
-4. For webhook mode: Set `WEBHOOK_DOMAIN` to your Railway domain
+4. For webhook mode: set `WEBHOOK_DOMAIN` to your Railway domain and `WEBHOOK_SECRET`
+   to a random `A-Za-z0-9_-` string
+
+**Ports:** Railway injects `PORT`; the bot prefers it over `WEBHOOK_PORT`
+(default 3000). Do not hardcode a port.
 
 **Polling vs Webhook:**
-- **Polling** (default): Bot continuously checks for updates. Simpler for development.
-- **Webhook**: Telegram sends updates to your server. More efficient for production. Enable by setting `WEBHOOK_DOMAIN` and `WEBHOOK_PORT` in `.env`.
+- **Polling** (default): the bot continuously checks for updates. Simpler for development.
+- **Webhook**: Telegram pushes updates to your server. More efficient for production.
+  Enabled by setting `WEBHOOK_DOMAIN`; `WEBHOOK_SECRET` makes Telegram sign every
+  request with the `X-Telegram-Bot-Api-Secret-Token` header.

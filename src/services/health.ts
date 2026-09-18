@@ -81,16 +81,26 @@ export class HealthService {
       const { db } = await import('./database.js');
       const start = Date.now();
 
-      // Validate all required tables exist and are queryable.
+      // conversations/facts/reminders/pending_actions/credentials have RLS
+      // enabled, so they only answer when the bot uses the service_role key.
+      // A failure here is the earliest, clearest signal that it is missing.
       const checks = await Promise.all([
         db.getClient().from('user_data').select('user_id').limit(1),
         db.getClient().from('command_history').select('id').limit(1),
         db.getClient().from('tasks').select('id').limit(1),
+        db.getClient().from('prompts').select('id').limit(1),
+        db.getClient().from('conversations').select('id').limit(1),
+        db.getClient().from('facts').select('id').limit(1),
+        db.getClient().from('reminders').select('id').limit(1),
       ]);
 
       const failedCheck = checks.find(result => result.error);
       if (failedCheck?.error) {
-        throw failedCheck.error;
+        const detail = failedCheck.error.message;
+        const rlsHint = /permission denied|row-level security|no rows/i.test(detail)
+          ? ' Set SUPABASE_SERVICE_ROLE_KEY: the assistant tables have RLS enabled.'
+          : '';
+        throw new Error(`${detail}${rlsHint}`);
       }
 
       const latency = Date.now() - start;

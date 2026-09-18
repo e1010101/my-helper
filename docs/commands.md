@@ -4,6 +4,23 @@ This document explains all available commands and how to add new ones.
 
 ## 📋 Built-in Commands
 
+| Command | Purpose |
+| --- | --- |
+| `/start` | Welcome message |
+| `/help` | List commands (admin section only shown to admins) |
+| `/ping` | Responsiveness + latency |
+| `/task` | Task CRUD (`-create`, `-read`, `-update`, `-delete`) |
+| `/tasks` | List tasks with completion toggles |
+| `/prompt` | Create a prompt template |
+| `/getprompt` | Search prompt templates |
+| `/status` | Admin: health, uptime, memory |
+| `/stats` | Admin: usage statistics |
+
+Any text message that does not start with `/` is answered by Gemini, except while a
+`/prompt` form is in progress.
+
+---
+
 ### `/start`
 **Description:** Welcome message for new users
 
@@ -49,11 +66,22 @@ Bot: 🏓 Pong!
 ---
 
 ### `/task`
-**Description:** Create a new to-do task with an interactive form
+**Description:** Create, read, update and delete to-do tasks
 
-**Usage:** `/task`
+**Usage:**
 
-**Flow:**
+| Command | Effect |
+| --- | --- |
+| `/task -create` | Opens the interactive form to create a task |
+| `/task -read <id>` | Shows full details of one task |
+| `/task -read all` | Lists all tasks (same as `/tasks`) |
+| `/task -update <id>` | Opens the form pre-filled with that task |
+| `/task -delete <id>` | Deletes that task |
+
+Running `/task` with no flag returns the usage summary — the form is opened by
+`/task -create`, not by the bare command.
+
+**Create flow:**
 1. Bot shows a form with `Name`, `Description`, and `Submit` buttons
 2. Tap `Name`, send the name text
 3. Tap `Description`, send the description text
@@ -61,13 +89,24 @@ Bot: 🏓 Pong!
 
 **Example:**
 ```
-User: /task
+User: /task -create
 Bot: 📝 New Task Form
      Name: (not set)
      Description: (not set)
      [Name] [Description]
      [Submit]
+
+User: /task -read 12
+Bot: 📖 Task Details (ID: 12)
+
+     Name: Buy groceries
+     Description: Milk, eggs, bread
+     Status: ⬜ Pending
+     Created: 3/2/2026, 9:14:00 AM
 ```
+
+Task names and descriptions are HTML-escaped before being echoed back, so
+characters like `<`, `&` and `*` cannot break the message or inject formatting.
 
 ---
 
@@ -80,6 +119,7 @@ Bot: 📝 New Task Form
 1. Fetches your tasks from the `tasks` table
 2. Shows up to 20 tasks, newest first
 3. Displays status, name, description, and created date
+4. The `[1]`, `[2]`, … buttons toggle a task between completed (✅) and uncompleted (⬜)
 
 **Example:**
 ```
@@ -89,6 +129,44 @@ Bot: 📝 Your Tasks (2)
         Milk, eggs, bread
         Created: 2/21/2026
 ```
+
+---
+
+### `/prompt`
+**Description:** Create a reusable prompt template with tags and an image
+
+**Usage:** `/prompt`
+
+**Flow:**
+1. Send the **title**
+2. Send the **prompt text**
+3. Send comma-separated **tags** (or `skip`)
+4. Send an **image** — the highest resolution Telegram offers is stored, as a `file_id`
+
+Sending text instead of an image at the last step cancels the draft, so a
+half-finished prompt never swallows your subsequent messages. Running `/prompt`
+again discards any existing draft.
+
+---
+
+### `/getprompt`
+**Description:** Search your saved prompt templates
+
+**Usage:**
+```
+/getprompt -title <text>
+/getprompt -tag <tag1,tag2>
+/getprompt -title <text> -tag <tag1,tag2>
+```
+
+**Behavior:**
+1. Title matching is a case-insensitive substring match (`ilike`)
+2. Tag matching requires **all** supplied tags (PostgreSQL array containment)
+3. Each result is sent as a photo with its title, tags and prompt text as the caption
+4. `⬅️ Previous` / `Next ➡️` buttons page through multiple results
+
+At least one of `-title` or `-tag` is required. Values may contain hyphens
+(`/getprompt -title my-prompt` works).
 
 ---
 

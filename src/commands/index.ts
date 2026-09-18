@@ -1,6 +1,8 @@
 import { Telegraf, Context, Markup } from 'telegraf';
 import { promptCommand, promptTextInputHandler, promptPhotoInputHandler, isUserInPromptFlow } from './prompt.js';
 import { getPromptCommand, getPromptActionHandler } from './getprompt.js';
+import { db, Task } from '../services/database.js';
+import { escapeHtml } from '../utils/telegram-format.js';
 
 export { isUserInPromptFlow };
 
@@ -12,7 +14,14 @@ export interface BotCommand {
 
 // Admin user IDs - add your Telegram user ID here
 // To find your user ID, message the bot and check the logs, or use a bot like @userinfobot
-const ADMIN_USER_IDS = [parseInt(process.env.ADMIN_USER_ID || '0')];
+const ADMIN_USER_IDS = (process.env.ADMIN_USER_ID || '')
+  .split(',')
+  .map((id) => Number.parseInt(id.trim(), 10))
+  .filter((id) => Number.isInteger(id) && id > 0);
+
+const TASK_LIST_LIMIT = 20;
+const MAX_TASK_DESCRIPTION_CHARS = 200;
+
 type TaskField = 'name' | 'description';
 
 interface TaskDraft {
@@ -41,6 +50,49 @@ function isAdmin(userId: number | undefined): boolean {
   return userId !== undefined && ADMIN_USER_IDS.includes(userId);
 }
 
+/** Telegram rejects messages longer than 4096 characters. */
+function truncate(text: string, maxLength: number): string {
+  return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
+}
+
+/**
+ * Renders a task list message plus its toggle keyboard. Task text is escaped
+ * because it is user-supplied and the message is sent with parse_mode HTML.
+ */
+function buildTaskListPayload(tasks: Task[]) {
+  const lines = tasks.map((task, index) => {
+    const status = task.completed ? '✅' : '⬜';
+    const createdAt = task.created_at
+      ? new Date(task.created_at).toLocaleDateString()
+      : 'unknown date';
+    const description = truncate(task.description ?? '', MAX_TASK_DESCRIPTION_CHARS);
+
+    return `${index + 1}. ${status} [ID: ${task.id}] ${escapeHtml(task.name)}\n   ${escapeHtml(description)}\n   Created: ${createdAt}`;
+  });
+
+  const buttons = tasks.map((task, index) =>
+    Markup.button.callback(`[${index + 1}]`, `task:toggle:${task.id}`)
+  );
+
+  const keyboardRows = [];
+  for (let i = 0; i < buttons.length; i += 5) {
+    keyboardRows.push(buttons.slice(i, i + 5));
+  }
+
+  return {
+    text: `📝 <b>Your Tasks (${tasks.length})</b>\n\n${lines.join('\n\n')}`,
+    reply_markup: Markup.inlineKeyboard(keyboardRows).reply_markup,
+  };
+}
+
+function parseTaskId(raw: string | undefined): number | null {
+  if (!raw) {
+    return null;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
 export function registerCommands(bot: Telegraf): void {
   // Import and register all commands
   bot.command('start', startCommand);
@@ -53,6 +105,8 @@ export function registerCommands(bot: Telegraf): void {
   bot.action(/^getprompt:(next|prev)$/, getPromptActionHandler);
   bot.action(/^task:(set_name|set_description|submit)$/, taskActionCommand);
   bot.action(/^task:toggle:(\d+)$/, toggleTaskActionCommand);
+  // Multi-step form input. Prompt drafts and task drafts are tracked in
+  // separate maps, so only one of these handlers consumes the message.
   bot.on('text', async (ctx, next) => {
     const promptHandled = await promptTextInputHandler(ctx);
     if (!promptHandled) {
@@ -71,7 +125,7 @@ export function registerCommands(bot: Telegraf): void {
 async function startCommand(ctx: Context) {
   const firstName = ctx.from?.first_name || 'there';
   await ctx.reply(
-    `👋 Hello ${firstName}! I'm your personal helper bot.\n\n` +
+    `👋 Hello ${escapeHtml(firstName)}! I'm your personal helper bot.\n\n` +
     `I can help you with various tasks. Use /help to see available commands.`
   );
 }
@@ -96,6 +150,8 @@ async function helpCommand(ctx: Context) {
 /getprompt - Retrieve saved prompts
   \`-title <text>\` : Search by title
   \`-tag <tag1,tag2>\` : Search by tags
+/forget - Clear the assistant's conversation memory
+/memory - Show what the assistant remembers about you
 `;
 
   if (isAdminUser) {
@@ -106,6 +162,7 @@ async function helpCommand(ctx: Context) {
 `;
   }
 
+  helpText += `\n_Just talk to me in plain text for anything else — I can set reminders, remember facts and manage tasks._`;
   helpText += `\n_More commands coming soon!_`;
 
   await ctx.reply(helpText, { parse_mode: 'Markdown' });
@@ -130,13 +187,13 @@ function getTaskFormKeyboard() {
 }
 
 function getTaskFormText(draft: TaskDraft): string {
-  const name = draft.name?.trim() || '(not set)';
-  const description = draft.description?.trim() || '(not set)';
+  const name = draft.name?.trim() ? escapeHtml(draft.name.trim()) : '(not set)';
+  const description = draft.description?.trim() ? escapeHtml(draft.description.trim()) : '(not set)';
   const awaitingText = draft.awaiting
     ? `\n\nWaiting for ${draft.awaiting} input...`
     : '\n\nTap Name or Description to edit, then tap Submit.';
 
-  return `📝 New Task Form\n\nName: ${name}\nDescription: ${description}${awaitingText}`;
+  return `📝 <b>New Task Form</b>\n\n<b>Name:</b> ${name}\n<b>Description:</b> ${description}${awaitingText}`;
 }
 
 async function renderTaskForm(ctx: Context, userId: number, draft: TaskDraft): Promise<void> {
@@ -146,6 +203,7 @@ async function renderTaskForm(ctx: Context, userId: number, draft: TaskDraft): P
   if (draft.messageId) {
     try {
       await ctx.telegram.editMessageText(draft.chatId, draft.messageId, undefined, text, {
+        parse_mode: 'HTML',
         reply_markup: keyboard,
       });
       return;
@@ -154,7 +212,7 @@ async function renderTaskForm(ctx: Context, userId: number, draft: TaskDraft): P
     }
   }
 
-  const sent = await ctx.reply(text, { reply_markup: keyboard });
+  const sent = await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard });
   draft.chatId = sent.chat.id;
   draft.messageId = sent.message_id;
   taskDrafts.set(userId, draft);
@@ -179,19 +237,17 @@ async function taskCommand(ctx: Context) {
     return;
   }
 
-  const idParam = parseInt(args[1], 10);
+  const idParam = parseTaskId(args[1]);
 
   try {
-    const { db } = await import('../services/database.js');
-
     if (flag === '-read') {
       if (args[1]?.toLowerCase() === 'all') {
         await tasksCommand(ctx);
         return;
       }
 
-      if (isNaN(idParam)) {
-        await ctx.reply('❌ Please provide a valid task ID: `/task -read <id>` or `/task -read all`');
+      if (idParam === null) {
+        await ctx.reply('❌ Please provide a valid task ID: `/task -read <id>` or `/task -read all`', { parse_mode: 'Markdown' });
         return;
       }
 
@@ -203,13 +259,20 @@ async function taskCommand(ctx: Context) {
 
       const status = task.completed ? '✅ Completed' : '⬜ Pending';
       const createdAt = new Date(task.created_at).toLocaleString();
-      await ctx.reply(`📖 *Task Details (ID: ${task.id})*\n\n*Name:* ${task.name}\n*Description:* ${task.description}\n*Status:* ${status}\n*Created:* ${createdAt}`, { parse_mode: 'Markdown' });
+      await ctx.reply(
+        `📖 <b>Task Details (ID: ${task.id})</b>\n\n` +
+        `<b>Name:</b> ${escapeHtml(task.name)}\n` +
+        `<b>Description:</b> ${escapeHtml(task.description ?? '')}\n` +
+        `<b>Status:</b> ${status}\n` +
+        `<b>Created:</b> ${createdAt}`,
+        { parse_mode: 'HTML' }
+      );
       return;
     }
 
     if (flag === '-delete') {
-      if (isNaN(idParam)) {
-        await ctx.reply('❌ Please provide a valid task ID: `/task -delete <id>`');
+      if (idParam === null) {
+        await ctx.reply('❌ Please provide a valid task ID: `/task -delete <id>`', { parse_mode: 'Markdown' });
         return;
       }
 
@@ -225,8 +288,8 @@ async function taskCommand(ctx: Context) {
     }
 
     if (flag === '-update') {
-      if (isNaN(idParam)) {
-        await ctx.reply('❌ Please provide a valid task ID: `/task -update <id>`');
+      if (idParam === null) {
+        await ctx.reply('❌ Please provide a valid task ID: `/task -update <id>`', { parse_mode: 'Markdown' });
         return;
       }
 
@@ -266,35 +329,18 @@ async function tasksCommand(ctx: Context) {
   }
 
   try {
-    const { db } = await import('../services/database.js');
-    const tasks = await db.getTasksByUser(userId, 20);
+    const tasks = await db.getTasksByUser(userId, TASK_LIST_LIMIT);
 
     if (tasks.length === 0) {
-      await ctx.reply('📝 You have no tasks yet. Use /task to create one.');
+      await ctx.reply('📝 You have no tasks yet. Use /task -create to create one.');
       return;
     }
 
-    const lines = tasks.map((task, index) => {
-      const status = task.completed ? '✅' : '⬜';
-      const createdAt = task.created_at
-        ? new Date(task.created_at).toLocaleDateString()
-        : 'unknown date';
+    const { text, reply_markup } = buildTaskListPayload(tasks);
 
-      return `${index + 1}. ${status} [ID: ${task.id}] ${task.name}\n   ${task.description}\n   Created: ${createdAt}`;
-    });
-
-    const buttons = tasks.map((task, index) =>
-      Markup.button.callback(`[${index + 1}]`, `task:toggle:${task.id}`)
-    );
-
-    const keyboardRows = [];
-    for (let i = 0; i < buttons.length; i += 5) {
-      keyboardRows.push(buttons.slice(i, i + 5));
-    }
-    const keyboard = Markup.inlineKeyboard(keyboardRows);
-
-    await ctx.reply(`📝 Your Tasks (${tasks.length})\n\n${lines.join('\n\n')}`, {
-      reply_markup: keyboard.reply_markup
+    await ctx.reply(text, {
+      parse_mode: 'HTML',
+      reply_markup
     });
   } catch (error) {
     console.error('Tasks command error:', error);
@@ -347,27 +393,30 @@ async function taskActionCommand(ctx: Context) {
   }
 
   try {
-    const { db } = await import('../services/database.js');
+    const name = draft.name.trim();
+    const description = draft.description.trim();
 
-    let confirmation = '';
+    let confirmation: string;
 
     if (draft.taskId) {
-      await db.updateTask(draft.taskId, userId, draft.name.trim(), draft.description.trim());
-      confirmation = `✏️ Task (ID: ${draft.taskId}) updated!\n\nName: ${draft.name.trim()}\nDescription: ${draft.description.trim()}`;
+      await db.updateTask(draft.taskId, userId, name, description);
+      confirmation = `✏️ <b>Task (ID: ${draft.taskId}) updated!</b>\n\n<b>Name:</b> ${escapeHtml(name)}\n<b>Description:</b> ${escapeHtml(description)}`;
     } else {
-      await db.createTask(userId, draft.name.trim(), draft.description.trim());
-      confirmation = `✅ Task created!\n\nName: ${draft.name.trim()}\nDescription: ${draft.description.trim()}`;
+      await db.createTask(userId, name, description);
+      confirmation = `✅ <b>Task created!</b>\n\n<b>Name:</b> ${escapeHtml(name)}\n<b>Description:</b> ${escapeHtml(description)}`;
     }
 
     try {
       if (draft.messageId) {
-        await ctx.telegram.editMessageText(draft.chatId, draft.messageId, undefined, confirmation);
+        await ctx.telegram.editMessageText(draft.chatId, draft.messageId, undefined, confirmation, {
+          parse_mode: 'HTML',
+        });
       } else {
-        await ctx.reply(confirmation);
+        await ctx.reply(confirmation, { parse_mode: 'HTML' });
       }
     } catch (error) {
       console.error('Error updating task confirmation message:', error);
-      await ctx.reply(confirmation);
+      await ctx.reply(confirmation, { parse_mode: 'HTML' });
     }
 
     taskDrafts.delete(userId);
@@ -399,23 +448,16 @@ async function taskActionCommand(ctx: Context) {
 
 async function toggleTaskActionCommand(ctx: Context) {
   const userId = ctx.from?.id;
-  const match = (ctx as any).match as RegExpExecArray | undefined;
-  const taskIdRaw = match?.[1];
+  const callbackData = ctx.callbackQuery && 'data' in ctx.callbackQuery ? ctx.callbackQuery.data : '';
+  // Payload shape is enforced by the registration regex ^task:toggle:(\d+)$
+  const taskId = parseTaskId(callbackData.split(':')[2]);
 
-  if (!userId || !taskIdRaw) {
-    await ctx.answerCbQuery();
-    return;
-  }
-
-  const taskId = parseInt(taskIdRaw, 10);
-  if (isNaN(taskId)) {
+  if (!userId || taskId === null) {
     await ctx.answerCbQuery('Invalid task ID', { show_alert: true });
     return;
   }
 
   try {
-    const { db } = await import('../services/database.js');
-
     const task = await db.getTask(taskId, userId);
     if (!task) {
       await ctx.answerCbQuery('Task not found', { show_alert: true });
@@ -426,34 +468,16 @@ async function toggleTaskActionCommand(ctx: Context) {
     await db.updateTaskStatus(taskId, userId, newStatus);
 
     // Fetch refreshed tasks list
-    const tasks = await db.getTasksByUser(userId, 20);
-
-    const lines = tasks.map((task, index) => {
-      const status = task.completed ? '✅' : '⬜';
-      const createdAt = task.created_at
-        ? new Date(task.created_at).toLocaleDateString()
-        : 'unknown date';
-
-      return `${index + 1}. ${status} [ID: ${task.id}] ${task.name}\n   ${task.description}\n   Created: ${createdAt}`;
-    });
-
-    const buttons = tasks.map((task, index) =>
-      Markup.button.callback(`[${index + 1}]`, `task:toggle:${task.id}`)
-    );
-
-    const keyboardRows = [];
-    for (let i = 0; i < buttons.length; i += 5) {
-      keyboardRows.push(buttons.slice(i, i + 5));
-    }
-    const keyboard = Markup.inlineKeyboard(keyboardRows);
+    const tasks = await db.getTasksByUser(userId, TASK_LIST_LIMIT);
+    const { text, reply_markup } = buildTaskListPayload(tasks);
 
     if (ctx.callbackQuery?.message && 'chat' in ctx.callbackQuery.message) {
       await ctx.telegram.editMessageText(
         ctx.callbackQuery.message.chat.id,
         ctx.callbackQuery.message.message_id,
         undefined,
-        `📝 Your Tasks (${tasks.length})\n\n${lines.join('\n\n')}`,
-        { reply_markup: keyboard.reply_markup }
+        text,
+        { parse_mode: 'HTML', reply_markup }
       );
     }
 
@@ -513,24 +537,24 @@ async function statusCommand(ctx: Context) {
     const dbEmoji = health.database.connected ? '✅' : '❌';
 
     const statusText = `
-${statusEmoji} *Bot Status*
+${statusEmoji} <b>Bot Status</b>
 
-*Uptime:* ${healthService.formatUptime()}
-*Status:* ${health.status.toUpperCase()}
+<b>Uptime:</b> ${healthService.formatUptime()}
+<b>Status:</b> ${health.status.toUpperCase()}
 
-*Components:*
+<b>Components:</b>
 ${botEmoji} Bot: ${health.bot.connected ? 'Connected' : 'Disconnected'} (${health.bot.mode})
-${dbEmoji} Database: ${health.database.connected ? 'Connected' : 'Disconnected'}${health.database.latency ? ` (${health.database.latency}ms)` : ''}${health.database.error ? `\n⚠️ DB Error: ${health.database.error}` : ''}
+${dbEmoji} Database: ${health.database.connected ? 'Connected' : 'Disconnected'}${health.database.latency ? ` (${health.database.latency}ms)` : ''}${health.database.error ? `\n⚠️ DB Error: ${escapeHtml(health.database.error)}` : ''}
 
-*System:*
+<b>System:</b>
 💾 Memory: ${health.system.memory.used}MB / ${health.system.memory.total}MB (${health.system.memory.percentage}%)
 🖥️ Platform: ${health.system.platform}
 ⚙️ Node: ${health.system.nodeVersion}
 
-*Last Check:* ${new Date(health.timestamp).toLocaleString()}
+<b>Last Check:</b> ${new Date(health.timestamp).toLocaleString()}
     `;
 
-    await ctx.reply(statusText, { parse_mode: 'Markdown' });
+    await ctx.reply(statusText, { parse_mode: 'HTML' });
   } catch (error) {
     console.error('Status command error:', error);
     await ctx.reply('❌ Failed to retrieve status');
@@ -546,8 +570,6 @@ async function statsCommand(ctx: Context) {
   }
 
   try {
-    const { db } = await import('../services/database.js');
-
     // Get command statistics
     const { data: recentCommands, error: recentError } = await db.getClient()
       .from('command_history')
@@ -579,20 +601,20 @@ async function statsCommand(ctx: Context) {
       .select('*', { count: 'exact', head: true });
 
     let statsText = `
-📊 *Usage Statistics*
+📊 <b>Usage Statistics</b>
 
-*Overall:*
+<b>Overall:</b>
 👥 Total Users: ${totalUsers || 0}
 📝 Total Commands: ${totalCommands || 0}
 
-*Top Commands (last 100):*
+<b>Top Commands (last 100):</b>
 `;
 
     topCommands.forEach(([cmd, count], index) => {
-      statsText += `${index + 1}. ${cmd}: ${count}×\n`;
+      statsText += `${index + 1}. ${escapeHtml(cmd)}: ${count}×\n`;
     });
 
-    await ctx.reply(statsText, { parse_mode: 'Markdown' });
+    await ctx.reply(statsText, { parse_mode: 'HTML' });
   } catch (error) {
     console.error('Stats command error:', error);
     await ctx.reply('❌ Failed to retrieve statistics');

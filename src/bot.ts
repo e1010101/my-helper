@@ -1,11 +1,18 @@
-import { Telegraf } from 'telegraf';
+import { Telegraf, Markup, type Context } from 'telegraf';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
-import { config } from './config/env.js';
+import { env } from './config/env.js';
 import { registerCommands, isUserInPromptFlow } from './commands/index.js';
 import { db } from './services/database.js';
 import { HealthService } from './services/health.js';
 import { logger } from './services/logger.js';
-import { aiService } from './services/ai.js';
+import { markdownToTelegramHtml, escapeHtml } from './utils/telegram-format.js';
+import { SupabaseAssistantStore } from './services/supabase-assistant-store.js';
+import { GeminiClient } from './services/gemini-client.js';
+import { AssistantService } from './services/assistant.js';
+import { ReminderScheduler } from './services/reminder-scheduler.js';
+import { createDefaultToolRegistry } from './tools/builtin-tools.js';
+import { formatLocal } from './services/reminder-time.js';
+import { registerAssistantCommands } from './commands/assistant-commands.js';
 
 let healthServiceInstance: HealthService | null = null;
 
@@ -13,19 +20,82 @@ export function getHealthService(): HealthService | null {
   return healthServiceInstance;
 }
 
+/** Telegram only accepts these characters in a webhook secret token. */
+const WEBHOOK_SECRET_PATTERN = /^[A-Za-z0-9_-]{1,256}$/;
+
+const CONFIRM_CALLBACK = /^assistant:(confirm|reject):(\d+)$/;
+
+type WebhookCallback = (
+  req: IncomingMessage & { body?: unknown },
+  res: ServerResponse,
+  next?: () => void
+) => Promise<void>;
+
 export class Bot {
   private bot: Telegraf;
   private healthService: HealthService;
   private httpServer?: ReturnType<typeof createServer>;
+  private assistant: AssistantService;
+  private scheduler: ReminderScheduler;
 
   constructor() {
-    this.bot = new Telegraf(config.telegram.token);
+    this.bot = new Telegraf(env.telegram().token, {
+      telegram: {
+        // Automatic webhook replies write to the response socket and conflict
+        // with the explicit ctx.reply() calls used throughout the handlers.
+        webhookReply: false,
+      },
+    });
+
     this.healthService = new HealthService(this.bot);
     healthServiceInstance = this.healthService;
+
+    const store = new SupabaseAssistantStore();
+    this.assistant = new AssistantService({
+      store,
+      registry: createDefaultToolRegistry(),
+      client: new GeminiClient(),
+      timezone: env.timezone(),
+    });
+
+    this.scheduler = new ReminderScheduler({
+      store,
+      timezone: env.timezone(),
+      deliver: async ({ reminder, late }) => {
+        const prefix = late ? '⏰ (missed earlier) ' : '⏰ ';
+        await this.sendToOwner(`${prefix}${escapeHtml(reminder.text)}`);
+      },
+      // The poll is the process heartbeat, so expired confirmations are
+      // cleaned up here rather than on a second timer.
+      onPoll: () => this.assistant.pruneExpiredConfirmations(),
+    });
+
     this.setupMiddleware();
     this.setupCommands();
+    this.setupAssistant();
     this.setupErrorHandling();
-    this.setupHealthEndpoint();
+  }
+
+  /**
+   * The owner's chat id. This is a single-user assistant, so the configured
+   * admin id is the chat we proactively message.
+   */
+  private ownerChatId(): number | null {
+    const raw = process.env.ADMIN_USER_ID?.split(',')[0]?.trim();
+    if (!raw) {
+      return null;
+    }
+    const parsed = Number.parseInt(raw, 10);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  private async sendToOwner(html: string): Promise<void> {
+    const chatId = this.ownerChatId();
+    if (chatId === null) {
+      logger.warn('Cannot deliver message: ADMIN_USER_ID is not configured');
+      return;
+    }
+    await this.bot.telegram.sendMessage(chatId, html, { parse_mode: 'HTML' });
   }
 
   private setupMiddleware() {
@@ -53,6 +123,37 @@ export class Bot {
 
   private setupCommands() {
     registerCommands(this.bot);
+    registerAssistantCommands(this.bot, this.assistant, env.timezone());
+  }
+
+  /** Conversational layer: free-form text plus tool confirmations. */
+  private setupAssistant() {
+    this.bot.action(CONFIRM_CALLBACK, async (ctx) => {
+      const userId = ctx.from?.id;
+      const data = ctx.callbackQuery && 'data' in ctx.callbackQuery ? ctx.callbackQuery.data : '';
+      const match = CONFIRM_CALLBACK.exec(data);
+
+      if (!userId || !match) {
+        await ctx.answerCbQuery();
+        return;
+      }
+
+      const [, decision, rawId] = match;
+      const actionId = Number.parseInt(rawId, 10);
+
+      await ctx.answerCbQuery();
+
+      try {
+        const reply = decision === 'confirm'
+          ? await this.assistant.approvePendingAction(userId, actionId)
+          : await this.assistant.rejectPendingAction(userId, actionId);
+
+        await this.replyToAssistant(ctx, reply);
+      } catch (error) {
+        logger.error('Failed to handle confirmation', error);
+        await ctx.reply('❌ Something went wrong handling that confirmation.');
+      }
+    });
 
     // Handle unknown commands and general text messages
     this.bot.on('text', async (ctx, next) => {
@@ -63,25 +164,21 @@ export class Bot {
 
       if (text.startsWith('/')) {
         const command = text.split(' ')[0];
-        // If we get here, the command wasn't handled
         await ctx.reply(
           `❓ Unknown command: ${command}\n\nUse /help to see available commands.`
         );
       } else if (userId) {
-        // Check if user is currently filling out a prompt form
+        // While a form is open, the message belongs to the form, not the model.
         if (isUserInPromptFlow(userId)) {
           logger.info(`Skipping AI response because user ${userId} is in prompt flow`);
           await next();
           return;
         }
 
-        // It's a regular text message, let's pass it to Gemini
         try {
-          logger.info(`Passing text to AI service for userId ${userId}`);
           await ctx.sendChatAction('typing');
-          const aiResponse = await aiService.generateResponse(userId, text);
-          logger.info(`AI Response generated: ${aiResponse.substring(0, 50)}...`);
-          await ctx.reply(aiResponse, { parse_mode: 'Markdown' });
+          const reply = await this.assistant.processMessage(userId, text);
+          await this.replyToAssistant(ctx, reply);
         } catch (error) {
           logger.error('Error generating AI response in bot handler', error);
           await ctx.reply('🤖 Sorry, I am having trouble connecting to my brain right now. Please try again later.');
@@ -89,6 +186,34 @@ export class Bot {
       }
       await next();
     });
+  }
+
+  private async replyToAssistant(
+    ctx: Context,
+    reply: Awaited<ReturnType<AssistantService['processMessage']>>
+  ): Promise<void> {
+    if (reply.kind === 'confirmation') {
+      const { id, summary, toolName } = reply.confirmation;
+      const text =
+        `🤔 <b>Confirm action</b>\n\n` +
+        `<b>${escapeHtml(toolName)}</b>\n${escapeHtml(summary)}\n\n` +
+        `This will change your data. Confirm?`;
+
+      await ctx.reply(text, {
+        parse_mode: 'HTML',
+        reply_markup: Markup.inlineKeyboard([
+          [
+            Markup.button.callback('✅ Confirm', `assistant:confirm:${id}`),
+            Markup.button.callback('🚫 Cancel', `assistant:reject:${id}`),
+          ],
+        ]).reply_markup,
+      });
+      return;
+    }
+
+    // Gemini answers in standard Markdown, which Telegram's legacy Markdown
+    // parser renders incorrectly, so convert to HTML instead.
+    await ctx.reply(markdownToTelegramHtml(reply.text), { parse_mode: 'HTML' });
   }
 
   private setupErrorHandling() {
@@ -103,22 +228,36 @@ export class Bot {
     process.once('SIGTERM', () => this.stop('SIGTERM'));
   }
 
-  private setupHealthEndpoint() {
-    // Create HTTP server for health checks (works in both polling and webhook modes)
-    this.httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-      // Health check endpoint
-      if (req.url === '/health' && req.method === 'GET') {
-        try {
-          const health = await this.healthService.getHealthStatus();
-          res.writeHead(health.status === 'healthy' ? 200 : 503, {
-            'Content-Type': 'application/json',
-          });
-          res.end(JSON.stringify(health, null, 2));
-        } catch (error) {
-          logger.error('Health check failed', error);
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ status: 'error', message: 'Health check failed' }));
-        }
+  /**
+   * Serves the health endpoint (and the bare root, which some platform
+   * healthchecks probe) so both polling and webhook modes stay observable.
+   */
+  private async handleHealthRequest(res: ServerResponse): Promise<void> {
+    try {
+      const health = await this.healthService.getHealthStatus();
+      res.writeHead(health.status === 'healthy' ? 200 : 503, {
+        'Content-Type': 'application/json',
+      });
+      res.end(JSON.stringify(health, null, 2));
+    } catch (error) {
+      logger.error('Health check failed', error);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'error', message: 'Health check failed' }));
+    }
+  }
+
+  private createHttpServer(webhookCallback?: WebhookCallback) {
+    const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+      const path = (req.url || '/').split('?')[0];
+
+      if ((path === '/health' || path === '/') && req.method === 'GET') {
+        await this.handleHealthRequest(res);
+        return;
+      }
+
+      // Webhook endpoint - delegate to Telegraf
+      if (webhookCallback && path === '/webhook' && req.method === 'POST') {
+        await webhookCallback(req, res);
         return;
       }
 
@@ -127,105 +266,81 @@ export class Bot {
       res.end('Not Found');
     });
 
-    this.httpServer.on('error', (error) => {
+    server.on('error', (error) => {
       logger.error('HTTP server error', error);
+    });
+
+    return server;
+  }
+
+  private listen(server: ReturnType<typeof createServer>, port: number, label: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      server.once('error', reject);
+      // Bind explicitly to all interfaces: platform healthchecks reach the
+      // container over the network, so a localhost-only bind fails them.
+      server.listen(port, '0.0.0.0', () => {
+        server.removeListener('error', reject);
+        logger.info(`${label} listening on 0.0.0.0:${port}`);
+        resolve();
+      });
     });
   }
 
   async start() {
-    if (config.webhook) {
+    if (env.webhook()) {
       // Webhook mode (for production)
-      // Create custom HTTP server that handles both webhook and health endpoint
-      const { domain, port } = config.webhook;
+      const { domain, port, secretToken } = env.webhook()!;
 
-      logger.info(`Starting bot in webhook mode on port ${port}`, { domain });
-
-      const webhookUrl = `https://${domain}/webhook`;
-
-      // Check if webhook is already set to avoid rate limits
-      try {
-        const webhookInfo = await this.bot.telegram.getWebhookInfo();
-        if (webhookInfo.url !== webhookUrl) {
-          logger.info(`Setting webhook to: ${webhookUrl}`);
-          await this.bot.telegram.setWebhook(webhookUrl);
-          logger.info(`Webhook set successfully`);
-        } else {
-          logger.info(`Webhook already set to: ${webhookUrl}`);
-        }
-      } catch (error: any) {
-        if (error.response?.error_code === 429) {
-          // Rate limited - wait and retry
-          const retryAfter = error.response?.parameters?.retry_after || 2;
-          logger.warn(`Rate limited. Waiting ${retryAfter} seconds before retry...`);
-          await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
-          await this.bot.telegram.setWebhook(webhookUrl);
-          logger.info(`Webhook set after retry`);
-        } else {
-          throw error;
-        }
+      if (secretToken && !WEBHOOK_SECRET_PATTERN.test(secretToken)) {
+        logger.warn(
+          'WEBHOOK_SECRET is ignored: Telegram only allows A-Z, a-z, 0-9, "_" and "-" (max 256 chars)'
+        );
       }
 
-      // Get Telegraf's webhook callback
-      const webhookCallback = await this.bot.createWebhook({ domain, path: '/webhook' });
+      const webhookUrl = `https://${domain}/webhook`;
+      logger.info(`Starting bot in webhook mode on port ${port}`, { domain, webhookUrl });
 
-      // Create HTTP server that handles both webhook and health
-      const webhookServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-        // Health check endpoint
-        if (req.url === '/health' && req.method === 'GET') {
-          try {
-            const health = await this.healthService.getHealthStatus();
-            res.writeHead(health.status === 'healthy' ? 200 : 503, {
-              'Content-Type': 'application/json',
-            });
-            res.end(JSON.stringify(health, null, 2));
-          } catch (error) {
-            logger.error('Health check failed', error);
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ status: 'error', message: 'Health check failed' }));
-          }
-          return;
-        }
+      // Tell Telegram about the endpoint. createWebhook() also registers the
+      // URL, so no separate setWebhook() call is needed (and no double request).
+      const webhookCallback = await this.retryOnRateLimit(
+        () => this.bot.createWebhook({
+          domain,
+          path: '/webhook',
+          ...(secretToken ? { secret_token: secretToken } : {}),
+        }) as Promise<WebhookCallback>
+      );
 
-        // Webhook endpoint - delegate to Telegraf
-        if (req.url === '/webhook') {
-          webhookCallback(req, res);
-          return;
-        }
+      // Verify the API credentials are usable before declaring success.
+      try {
+        await this.bot.telegram.getMe();
+      } catch (error) {
+        logger.error('Failed to reach the Telegram API with the configured token', error);
+        throw error;
+      }
 
-        // 404 for other endpoints
-        res.writeHead(404, { 'Content-Type': 'text/plain' });
-        res.end('Not Found');
-      });
-
-      // Start the webhook server
-      await new Promise<void>((resolve) => {
-        webhookServer.listen(port, () => {
-          logger.info(`Webhook server listening on port ${port}`);
-          resolve();
-        });
-      });
-
-      // Store the webhook server so we can close it later
+      const webhookServer = this.createHttpServer(webhookCallback);
+      await this.listen(webhookServer, port, 'Webhook server');
       this.httpServer = webhookServer;
+
+      this.startScheduler();
 
       logger.info('✅ Bot is running!', {
         mode: 'webhook',
         healthEndpoint: `https://${domain}/health`,
         webhookEndpoint: webhookUrl,
+        webhookSecretEnabled: Boolean(secretToken),
       });
     } else {
       // Polling mode (for development)
-      // Start standalone HTTP server for health checks
-      const port = 3000;
-      await new Promise<void>((resolve) => {
-        this.httpServer?.listen(port, () => {
-          logger.info(`Health endpoint listening on port ${port}`);
-          resolve();
-        });
-      });
+      const port = env.port();
+
+      this.httpServer = this.createHttpServer();
+      await this.listen(this.httpServer, port, 'Health endpoint');
 
       logger.info('Starting bot in polling mode...');
       await this.bot.launch();
+
+      this.startScheduler();
 
       logger.info('✅ Bot is running!', {
         mode: 'polling',
@@ -234,16 +349,67 @@ export class Bot {
     }
   }
 
+  private startScheduler() {
+    if (this.ownerChatId() === null) {
+      logger.warn('Reminder scheduler not started: ADMIN_USER_ID is unset, so reminders have no destination');
+      return;
+    }
+
+    this.scheduler.start();
+    logger.info('Reminders will be delivered to the configured owner', {
+      timezone: env.timezone(),
+      note: `next poll every 30s; local time now ${formatLocal(new Date(), env.timezone())}`,
+    });
+  }
+
+  /**
+   * Telegram rate limits setWebhook/getWebhookInfo calls. On 429 we honour the
+   * server-provided retry_after before trying once more.
+   */
+  private async retryOnRateLimit<T>(attempt: () => Promise<T>): Promise<T> {
+    try {
+      return await attempt();
+    } catch (error) {
+      const response = (error as { response?: { error_code?: number; parameters?: { retry_after?: number } } })?.response;
+
+      if (response?.error_code !== 429) {
+        throw error;
+      }
+
+      const retryAfter = response.parameters?.retry_after ?? 2;
+      logger.warn(`Rate limited by Telegram. Waiting ${retryAfter}s before retry...`);
+      await new Promise((resolve) => setTimeout(resolve, retryAfter * 1000));
+      return await attempt();
+    }
+  }
+
   async stop(signal: string) {
     logger.info(`Received ${signal}, stopping bot...`);
 
-    // Stop HTTP server
+    this.scheduler.stop();
+
+    // Stop HTTP server. close() waits for open keep-alive connections to end,
+    // which can outlive a platform restart.
     if (this.httpServer) {
+      const server = this.httpServer;
+      this.httpServer = undefined;
+
       await new Promise<void>((resolve) => {
-        this.httpServer?.close(() => {
+        const timer = setTimeout(() => {
+          logger.warn('HTTP server close timed out; forcing remaining connections shut');
+          server.closeAllConnections?.();
+          resolve();
+        }, 5000);
+
+        server.close(() => {
+          clearTimeout(timer);
           logger.info('HTTP server stopped');
           resolve();
         });
+
+        // Drop connections sitting idle in the keep-alive pool without
+        // interrupting requests that are still being served.
+        server.closeIdleConnections?.();
       });
     }
 
@@ -253,5 +419,9 @@ export class Bot {
 
   getBot() {
     return this.bot;
+  }
+
+  getAssistant() {
+    return this.assistant;
   }
 }
