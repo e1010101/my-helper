@@ -276,6 +276,16 @@ test('/memory reads back stored facts and reminders', async () => {
   assert.match(lastMessage(), /Water plants/);
 });
 
+test('/status answers the admin with a health report', async () => {
+  apiCalls.length = 0;
+  await sendText('/status');
+
+  // The dependencies are unreachable in tests, so the report should say so
+  // rather than crashing — this also exercises the health path end to end.
+  assert.match(allMessages(), /Bot Status/);
+  assert.match(allMessages(), /Database:/);
+});
+
 test('/forget clears conversation memory only', async () => {
   const internals = assistant as unknown as AssistantInternals;
   const store = internals.store as InMemoryAssistantStore;
