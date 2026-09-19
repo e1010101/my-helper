@@ -402,6 +402,47 @@ test('/health and /ready answer different questions', async () => {
   }
 });
 
+test('a transient polling failure is retried rather than killing the service', async () => {
+  // Regression guard: a network blip must not take the bot down. By the time
+  // polling starts, the HTTP server and reminder scheduler are already running,
+  // so retrying is strictly better than exiting. (A rejected token is the
+  // opposite case and still exits, which cannot be asserted here without
+  // stopping the test runner.)
+  const previousPort = process.env.PORT;
+  process.env.PORT = '3398';
+
+  const pollingBot = new Bot();
+  const attempts: string[] = [];
+  let shouldFail = true;
+
+  (pollingBot.getBot() as unknown as { launch(): Promise<void> }).launch = () => {
+    if (shouldFail) {
+      shouldFail = false;
+      attempts.push('fail');
+      return Promise.reject(new Error('request to api.telegram.org failed, reason: read ECONNRESET'));
+    }
+    attempts.push('ok');
+    // Settle so the method returns instead of polling forever.
+    return Promise.resolve();
+  };
+
+  try {
+    await pollingBot.start();
+
+    const internals = pollingBot as unknown as { scheduler: { isRunning(): boolean } };
+    assert.equal(internals.scheduler.isRunning(), true, 'the scheduler still starts');
+
+    // Wait past the first retry backoff (2s).
+    await new Promise((resolve) => setTimeout(resolve, 2600));
+
+    assert.deepEqual(attempts, ['fail', 'ok'], 'launch was retried after the transient error');
+  } finally {
+    pollingBot.dispose();
+    await pollingBot.stop('test');
+    process.env.PORT = previousPort;
+  }
+});
+
 test('polling mode starts the reminder scheduler even though launch() never resolves', async () => {
   // Regression test: Telegraf's launch() returns the long-poll loop promise, so
   // it does not settle while polling. Awaiting it blocked everything after it,

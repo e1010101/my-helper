@@ -24,6 +24,21 @@ export function getHealthService(): HealthService | null {
 /** Telegram only accepts these characters in a webhook secret token. */
 const WEBHOOK_SECRET_PATTERN = /^[A-Za-z0-9_-]{1,256}$/;
 
+/**
+ * Distinguishes a configuration error from a transient one. 401/404 mean the
+ * token is wrong or revoked and no amount of retrying will help; anything else
+ * (ECONNRESET, timeouts, 5xx) is worth another attempt.
+ */
+function isAuthenticationError(error: unknown): boolean {
+  const status = (error as { response?: { error_code?: number } })?.response?.error_code;
+  if (status === 401 || status === 404) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  return /unauthorized|not found/i.test(message) && /40[14]/.test(message);
+}
+
 const CONFIRM_CALLBACK = /^assistant:(confirm|reject):(\d+)$/;
 
 type WebhookCallback = (
@@ -393,12 +408,8 @@ export class Bot {
       // launch() resolves only when polling *stops*: it returns the long-poll
       // loop promise. Awaiting it here would block everything after it, which
       // previously meant the scheduler never started in polling mode and
-      // reminders were never delivered. Start it in the background and treat
-      // rejection as fatal instead.
-      void this.bot.launch().catch((error) => {
-        logger.error('Bot polling failed; exiting', error);
-        process.exit(1);
-      });
+      // reminders were never delivered. Start it in the background instead.
+      void this.launchPolling();
 
       this.startScheduler();
 
@@ -406,6 +417,42 @@ export class Bot {
         mode: 'polling',
         healthEndpoint: `http://localhost:${port}/health`,
       });
+    }
+  }
+
+  /**
+   * Runs the polling loop, retrying transient failures.
+   *
+   * A network blip must not take the service down: the HTTP server and the
+   * reminder scheduler are already running, so the right response is to try
+   * again. A rejected token, by contrast, will never fix itself, so exit and
+   * let the platform surface it rather than retrying forever.
+   */
+  private async launchPolling(): Promise<void> {
+    const MAX_ATTEMPTS = 5;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        await this.bot.launch();
+        return; // polling stopped cleanly
+      } catch (error) {
+        if (isAuthenticationError(error)) {
+          logger.error('Telegram rejected the bot token; exiting', error);
+          process.exit(1);
+        }
+
+        if (attempt === MAX_ATTEMPTS) {
+          logger.error(`Polling failed ${MAX_ATTEMPTS} times; exiting`, error);
+          process.exit(1);
+        }
+
+        const delayMs = Math.min(30_000, 2 ** attempt * 1000);
+        logger.warn(
+          `Polling failed (attempt ${attempt}/${MAX_ATTEMPTS}); retrying in ${delayMs / 1000}s`,
+          { reason: error instanceof Error ? error.message : String(error) }
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
     }
   }
 
