@@ -122,15 +122,20 @@ test('webhook requests without the secret token are rejected and never handled',
       return realHandleUpdate(update as never, response as never);
     };
 
-  // Capture the options start() passes, so this test fails if the production
-  // code stops supplying the secret rather than merely re-testing Telegraf.
+  // Capture the options start() passes and the handler it receives, so this
+  // test exercises production's own callback rather than a fresh one.
   const realWebhookCallback = telegraf.webhookCallback.bind(telegraf);
   const callbackOptions: Record<string, unknown>[] = [];
+  let productionCallback: ((req: unknown, res: unknown) => Promise<void>) | undefined;
   (telegraf as unknown as {
     webhookCallback(p: string, o?: Record<string, unknown>): unknown;
   }).webhookCallback = (path: string, options?: Record<string, unknown>) => {
     callbackOptions.push(options ?? {});
-    return realWebhookCallback(path, options as never);
+    productionCallback = realWebhookCallback(path, options as never) as unknown as (
+      req: unknown,
+      res: unknown
+    ) => Promise<void>;
+    return productionCallback;
   };
 
   await bot.start();
@@ -150,10 +155,9 @@ test('webhook requests without the secret token are rejected and never handled',
     assert.equal(setWebhookCall.payload.secret_token, process.env.WEBHOOK_SECRET);
     assert.equal(setWebhookCall.payload.url, 'https://example.invalid/webhook');
 
-    // 3. Drive the handler production actually built.
-    const callback = realWebhookCallback('/webhook', {
-      secretToken: process.env.WEBHOOK_SECRET,
-    });
+    // 3. Drive the exact handler production built.
+    assert.ok(productionCallback, 'start() produced a request handler');
+    const callback = productionCallback;
 
     const invoke = async (headers: Record<string, string>) => {
       const res = fakeResponse();
