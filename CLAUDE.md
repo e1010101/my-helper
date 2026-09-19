@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A powerful, extensible Telegram bot built with TypeScript, designed for personal use. The bot uses the Telegraf framework for Telegram integration, Supabase for PostgreSQL storage, and a configurable LLM provider for conversational replies.
 
 **Tech Stack:**
-- **Runtime:** Node.js (v18+) with TypeScript (ESM — imports use `.js` extensions)
+- **Runtime:** Node.js (v20+) with TypeScript (ESM — imports use `.js` extensions)
 - **Bot Framework:** Telegraf v4
 - **Database:** Supabase (PostgreSQL)
 - **AI:** DeepSeek (`deepseek-chat`) by default; Google Gemini also supported
@@ -89,7 +89,11 @@ src/
 - Wires the assistant: `SupabaseAssistantStore` → `AssistantService` (with the default
   tool registry and the configured `AIClient`) → `ReminderScheduler`
 - Routes non-command text to the assistant (skipped while a `/prompt` draft is active)
-- Serves `/health` (and `/`) plus `/webhook` from one HTTP server in both modes
+- Serves `/health` (liveness), `/ready` (readiness, including a database write probe)
+  and `/` plus `/webhook` from one HTTP server in both modes. Keep the two health
+  endpoints distinct: a database outage must not fail Railway's healthcheck, because
+  restarting cannot repair a database and a crash loop would take the bot down
+  entirely instead of degrading.
 - Binds explicitly to `0.0.0.0` and prefers the platform-injected `PORT`
 - Starts the reminder scheduler only when `ADMIN_USER_ID` gives it a destination
 - Handles graceful shutdown on SIGINT/SIGTERM (scheduler, then HTTP server, then bot)
