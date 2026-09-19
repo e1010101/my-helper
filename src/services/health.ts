@@ -92,6 +92,7 @@ export class HealthService {
         db.getClient().from('conversations').select('id').limit(1),
         db.getClient().from('facts').select('id').limit(1),
         db.getClient().from('reminders').select('id').limit(1),
+        db.getClient().from('health_probes').select('id').limit(1),
       ]);
 
       const failedCheck = checks.find(result => result.error);
@@ -144,32 +145,39 @@ export class HealthService {
 }
 
 /**
- * Inserts and then removes a scratch row in an RLS-protected table, so a
- * misconfigured Supabase key is reported with an actionable message instead of
- * being discovered later as mysteriously empty memory.
+ * Proves the assistant tables are actually writable, so a misconfigured
+ * Supabase key is reported with an actionable message instead of surfacing
+ * later as mysteriously empty memory.
+ *
+ * A read cannot detect this: with the wrong key, RLS returns zero rows rather
+ * than an error. Only a write reveals it.
+ *
+ * The probe uses a dedicated `health_probes` row keyed by a fixed id and an
+ * upsert, so a monitor polling this endpoint cannot accumulate rows or inflate
+ * a sequence. Earlier this inserted into `conversations` and ignored the delete
+ * error, which meant a failed cleanup leaked a row per health check forever.
  *
  * Returns a description of the problem, or null when the tables are writable.
  */
 async function probeAssistantTablesWritable(): Promise<string | null> {
-  const PROBE_USER_ID = -1; // never a real Telegram user id
+  const PROBE_ID = 'startup-readiness';
 
   try {
     const { db } = await import('./database.js');
     const client = db.getClient();
 
-    const { error: insertError } = await client
-      .from('conversations')
-      .insert({ user_id: PROBE_USER_ID, role: 'user', content: 'health probe' });
+    const { error: upsertError } = await client
+      .from('health_probes')
+      .upsert({ id: PROBE_ID, checked_at: new Date().toISOString() }, { onConflict: 'id' });
 
-    if (insertError) {
-      if (/permission denied|row-level security|violates row-level/i.test(insertError.message)) {
-        return `cannot write to the assistant tables (${insertError.message}). ` +
+    if (upsertError) {
+      if (/permission denied|row-level security|violates row-level/i.test(upsertError.message)) {
+        return `cannot write to the assistant tables (${upsertError.message}). ` +
           'Set SUPABASE_SERVICE_ROLE_KEY to the service_role key from Project Settings -> API.';
       }
-      return `the assistant tables are not writable: ${insertError.message}`;
+      return `the assistant tables are not writable: ${upsertError.message}`;
     }
 
-    await client.from('conversations').delete().eq('user_id', PROBE_USER_ID);
     return null;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

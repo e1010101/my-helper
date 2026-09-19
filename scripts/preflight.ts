@@ -147,6 +147,7 @@ if (supabaseUrl && serviceKey && !/^(your_|\[|<)/.test(supabaseUrl)) {
       'reminders',
       'pending_actions',
       'credentials',
+      'health_probes',
     ];
 
     const missing: string[] = [];

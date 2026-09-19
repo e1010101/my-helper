@@ -198,6 +198,18 @@ CREATE TRIGGER update_credentials_updated_at
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();
 
+-- Health probe target. The readiness check upserts one fixed row here to prove
+-- writes work, which is the only way to detect a wrong Supabase key: with RLS,
+-- reads return zero rows instead of erroring. A dedicated table with a
+-- caller-supplied key means a monitor polling every 30s can never accumulate
+-- rows or inflate a sequence.
+CREATE TABLE IF NOT EXISTS health_probes (
+  id TEXT PRIMARY KEY,
+  checked_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE health_probes IS 'Single-row target used by the readiness write probe';
+
 -- ============================================================
 -- Row Level Security
 -- ============================================================
@@ -211,6 +223,7 @@ ALTER TABLE facts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE reminders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE pending_actions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE credentials ENABLE ROW LEVEL SECURITY;
+ALTER TABLE health_probes ENABLE ROW LEVEL SECURITY;
 
 DO $$
 DECLARE
@@ -225,7 +238,7 @@ BEGIN
     RETURN;
   END IF;
 
-  FOREACH target IN ARRAY ARRAY['conversations', 'facts', 'reminders', 'pending_actions', 'credentials']
+  FOREACH target IN ARRAY ARRAY['conversations', 'facts', 'reminders', 'pending_actions', 'credentials', 'health_probes']
   LOOP
     -- CREATE POLICY has no IF NOT EXISTS, so a duplicate is swallowed by name.
     -- That keeps this file safe to re-run, which matters because it is applied
@@ -246,4 +259,4 @@ END $$;
 -- SELECT * FROM user_data LIMIT 5;
 -- SELECT * FROM command_history ORDER BY created_at DESC LIMIT 10;
 -- SELECT id, title, tags FROM prompts ORDER BY created_at DESC LIMIT 10;
--- SELECT relname, relrowsecurity FROM pg_class WHERE relname IN ('conversations','facts','reminders','pending_actions','credentials');
+-- SELECT relname, relrowsecurity FROM pg_class WHERE relname IN ('conversations','facts','reminders','pending_actions','credentials','health_probes');

@@ -164,18 +164,20 @@ static strings with no interpolation.
 
 Required Supabase tables (full DDL in [docs/database-schema.sql](docs/database-schema.sql)):
 `user_data`, `command_history`, `tasks`, `prompts`, `conversations`, `facts`,
-`reminders`, `pending_actions`, `credentials`. The health check queries the first seven,
-so a missing table makes `/health` report `unhealthy`.
+`reminders`, `pending_actions`, `credentials`, `health_probes`. The health check queries
+all of them, so a missing table makes `/health` report `unhealthy`.
 
-`conversations`, `facts`, `reminders`, `pending_actions` and `credentials` have Row
-Level Security enabled with only a `service_role` policy. **The bot must run with
-`SUPABASE_SERVICE_ROLE_KEY`**; never ship that key to a client.
+`conversations`, `facts`, `reminders`, `pending_actions`, `credentials` and
+`health_probes` have Row Level Security enabled with only a `service_role` policy. **The
+bot must run with `SUPABASE_SERVICE_ROLE_KEY`**; never ship that key to a client.
 
 Two important consequences:
 
 - Reading an RLS-protected table with the wrong key does **not** error, it returns zero
-  rows. That is why the health check performs a write probe rather than a SELECT when
-  deciding whether the database is usable.
+  rows. That is why the readiness probe performs a write rather than a SELECT when
+  deciding whether the database is usable — and why it writes to `health_probes`, a
+  fixed-key single row, instead of `conversations`: a monitor polling every 30s must
+  never be able to accumulate rows or inflate a sequence.
 - The policy block in the schema is skipped when `service_role` does not exist, so the
   file also applies cleanly to a plain Postgres instance (useful for testing).
 

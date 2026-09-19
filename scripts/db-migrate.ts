@@ -198,9 +198,10 @@ const REQUIRED_TABLES = [
   'reminders',
   'pending_actions',
   'credentials',
+  'health_probes',
 ];
 
-const RLS_TABLES = ['conversations', 'facts', 'reminders', 'pending_actions', 'credentials'];
+const RLS_TABLES = ['conversations', 'facts', 'reminders', 'pending_actions', 'credentials', 'health_probes'];
 
 const verifySql = `
 SELECT json_agg(row_to_json(t) ORDER BY t.table_name)

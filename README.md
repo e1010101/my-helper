@@ -341,6 +341,7 @@ The bot requires these Supabase tables:
 - `reminders` - Scheduled reminders
 - `pending_actions` - Write-tool confirmations awaiting a tap
 - `credentials` - Provider tokens (service_role only)
+- `health_probes` - Single fixed row the `/ready` write probe upserts
 
 Run the SQL from `docs/database-schema.sql` in your Supabase SQL Editor to create these tables.
 The health endpoint reports `unhealthy` if any of them is missing.
@@ -360,7 +361,7 @@ Before deploying — or whenever something looks wrong — run the preflight che
 npm run preflight
 ```
 
-It verifies every required variable, that the Telegram token works, that all nine tables
+It verifies every required variable, that the Telegram token works, that all ten tables
 exist, that the service-role key can actually write to the RLS-protected tables, that the
 anon key is correctly refused, that the configured model answers, and that reminders have
 a delivery destination. Read-only against your data.
