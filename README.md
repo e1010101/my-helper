@@ -199,7 +199,10 @@ my-helper/
 │   │   ├── supabase-assistant-store.ts   # Postgres-backed memory/facts/reminders
 │   │   ├── in-memory-assistant-store.ts  # Test/fallback implementation
 │   │   ├── assistant.ts        # Conversation loop + tool confirmations
-│   │   ├── gemini-client.ts    # Gemini API wrapper (AIClient interface)
+│   │   ├── ai-client.ts        # Provider-neutral AIClient contract
+│   │   ├── ai-provider.ts      # Picks a provider from configuration
+│   │   ├── deepseek-provider.ts # DeepSeek implementation (default)
+│   │   ├── gemini-provider.ts  # Gemini implementation (alternative)
 │   │   ├── reminder-time.ts    # Timezone maths + natural-language time parsing
 │   │   ├── reminder-scheduler.ts # Polls and delivers due reminders
 │   │   ├── health.ts           # Health snapshot for /health and /status
@@ -215,13 +218,18 @@ my-helper/
 │   ├── types/
 │   │   └── assistant.ts        # Shared assistant data shapes
 │   ├── utils/
-│   │   └── telegram-format.ts  # HTML escaping + Markdown→Telegram HTML
+│   │   ├── telegram-format.ts  # HTML escaping + Markdown→Telegram HTML
+│   │   └── telegram-chunk.ts   # Splits messages to Telegram's 4096-char limit
 │   ├── bot.ts                  # Bot setup, middleware, HTTP server, wiring
 │   └── index.ts                # Entry point
 ├── scripts/
-│   └── webhook-manager.ts      # Telegram webhook CLI
+│   ├── webhook-manager.ts      # Telegram webhook CLI
+│   ├── db-migrate.ts           # applies the schema via psql
+│   ├── preflight.ts            # checks local config before deploying
+│   └── verify-deploy.ts        # checks a live deployment
 ├── tests/                      # node:test suites (npm test)
 ├── docs/
+│   ├── architecture.md         # system architecture, with diagrams
 │   ├── database-schema.sql     # Supabase table definitions
 │   └── deployment.md           # Deployment guides
 ├── .env.example                # Environment template
@@ -237,8 +245,14 @@ npm test          # node:test suites under tests/
 ```
 
 The assistant layer is built around interfaces (`AssistantStore`, `AIClient`,
-`ToolRegistry`) with in-memory implementations, so the reminder scheduler, the tool
-loop and the time maths are all tested without a live database, Telegram or Gemini.
+`ToolRegistry`, `Clock`) with in-memory implementations, so the reminder scheduler, the
+tool loop and the time maths are all tested without a live database, Telegram or a model
+provider.
+
+**Want to understand how it fits together?** [docs/architecture.md](docs/architecture.md)
+explains the system with diagrams: the request path, the tool-calling loop and its
+confirmation gate, how reminders survive restarts and daylight saving, the data model
+and its Row Level Security posture, and the reasoning behind each decision.
 
 ### Adding New Commands
 
