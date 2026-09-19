@@ -132,10 +132,17 @@ export class DeepSeekProvider implements AIClient {
     }));
   }
 
-  async generate(messages: AgentMessage[], registry?: RegistryLike): Promise<ModelTurn> {
+  async generate(
+    messages: AgentMessage[],
+    registry?: RegistryLike,
+    systemInstruction?: string
+  ): Promise<ModelTurn> {
     const body: Record<string, unknown> = {
       model: this.model,
-      messages: DeepSeekProvider.toChatMessages(messages, this.systemInstruction),
+      messages: DeepSeekProvider.toChatMessages(
+        messages,
+        systemInstruction ?? this.systemInstruction
+      ),
     };
 
     const tools = this.buildTools(registry);

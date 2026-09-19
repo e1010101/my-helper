@@ -13,7 +13,7 @@ export function summariseCall(tool: ToolDefinition, args: Record<string, unknown
 const currentTime: ToolDefinition = {
   name: 'current_time',
   description:
-    "Get the user's current local date, time and timezone. Use this before scheduling anything relative to now.",
+    "Get the user's current local date, time and timezone. The system prompt already states the current time, but call this whenever you are about to say what time it is, resolve a relative request like 'in 10 minutes', or judge whether something is in the past.",
   kind: 'read',
   parameters: { type: 'object', properties: {} },
   async execute(_args, context) {

@@ -66,14 +66,18 @@ export class GeminiProvider implements AIClient {
     return contents;
   }
 
-  async generate(messages: AgentMessage[], registry?: ToolRegistry | RegistryLike): Promise<ModelTurn> {
+  async generate(
+    messages: AgentMessage[],
+    registry?: ToolRegistry | RegistryLike,
+    systemInstruction?: string
+  ): Promise<ModelTurn> {
     const tools = registry?.toFunctionDeclarations() ?? [];
 
     const response = await this.ai.models.generateContent({
       model: this.model,
       contents: GeminiProvider.toContents(messages),
       config: {
-        systemInstruction: this.systemInstruction,
+        systemInstruction: systemInstruction ?? this.systemInstruction,
         ...(tools.length > 0
           ? {
             tools: [

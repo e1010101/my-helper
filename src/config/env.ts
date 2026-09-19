@@ -145,6 +145,38 @@ export const env = {
     return process.env.BOT_PERSONALITY_PROMPT || DEFAULT_PERSONALITY;
   },
 
+  /**
+   * The system prompt for a given moment.
+   *
+   * The current time is injected rather than left to the model because it has
+   * no other way to know it: without this the model either invents a time or
+   * reuses one from earlier in the conversation, which makes relative requests
+   * like "in 2 minutes" silently wrong.
+   */
+  systemInstruction(now: Date = new Date(), timezone?: string): string {
+    const zone = timezone || resolveTimezone();
+    const formatted = new Intl.DateTimeFormat('en-GB', {
+      timeZone: zone,
+      weekday: 'long',
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(now);
+
+    return [
+      this.personalityPrompt(),
+      '',
+      `Current date and time: ${formatted} (${zone}).`,
+      'Treat that as the present moment for anything time-related.',
+      'For relative requests like "in 10 minutes" or "tomorrow", resolve them against it,',
+      'and call a tool to check the current time or scheduled reminders before telling the',
+      'user what is already scheduled or when something will happen.',
+    ].join('\n');
+  },
+
   webhook(): WebhookConfig | undefined {
     const domain = process.env.WEBHOOK_DOMAIN?.trim();
     if (!domain) {

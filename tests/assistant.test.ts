@@ -23,15 +23,51 @@ function textTurn(text: string): ModelTurn {
   return { text, toolCalls: [] };
 }
 
+/**
+ * Asserts the conversation is well-formed for any chat API: every tool result
+ * must answer a preceding assistant tool call.
+ *
+ * This mirrors the validation DeepSeek and OpenAI apply (and that Gemini
+ * enforces with its own error). Without it a malformed conversation passes
+ * every fake-client test and fails only against the real provider.
+ */
+function assertValidConversation(messages: AgentMessage[]): void {
+  const openCallIds = new Set<string>();
+
+  for (const message of messages) {
+    if (message.role === 'assistant') {
+      for (const call of message.toolCalls ?? []) {
+        openCallIds.add(call.id);
+      }
+      continue;
+    }
+
+    if (message.role === 'tool') {
+      assert.ok(
+        openCallIds.has(message.toolCallId),
+        `tool message "${message.toolCallId}" has no preceding assistant tool_calls entry`
+      );
+      openCallIds.delete(message.toolCallId);
+    }
+  }
+}
+
 /** Scripted AI client that records what it was asked. */
 class FakeClient implements AIClient {
   readonly name = 'fake';
   readonly calls: AgentMessage[][] = [];
+  readonly systemInstructions: (string | undefined)[] = [];
 
   constructor(private readonly script: ModelTurn[]) {}
 
-  async generate(messages: AgentMessage[]): Promise<ModelTurn> {
+  async generate(
+    messages: AgentMessage[],
+    _registry?: unknown,
+    systemInstruction?: string
+  ): Promise<ModelTurn> {
+    assertValidConversation(messages);
     this.calls.push(structuredClone(messages));
+    this.systemInstructions.push(systemInstruction);
     const next = this.script.shift();
     if (!next) {
       throw new Error('FakeClient ran out of scripted turns');
@@ -384,4 +420,66 @@ test('forgetConversation clears memory but keeps facts', async () => {
 
   assert.equal(await store.countMessages(1), 0);
   assert.equal((await store.getFact(1, 'home_city'))?.value, 'Singapore');
+});
+
+test('every request carries the current time in the system prompt', async () => {
+  // Regression test: without this the model has no idea what time it is, and
+  // answers relative questions using a stale time from earlier in the
+  // conversation. NOW is 09:00 in Singapore.
+  const { service, client } = makeService([textTurn('ok')]);
+
+  await service.processMessage(1, 'what time is it?');
+
+  const instruction = client.systemInstructions[0];
+  assert.ok(instruction, 'a system instruction was sent');
+  assert.match(instruction, /Current date and time:/);
+  assert.match(instruction, /09:00/, 'the local time is stated');
+  assert.match(instruction, /10 March 2026/, 'the local date is stated');
+  assert.match(instruction, /Asia\/Singapore/, 'the timezone is stated');
+});
+
+test('the injected time reflects the moment, not a cached value', async () => {
+  const store = new InMemoryAssistantStore();
+  const client = new FakeClient([textTurn('a'), textTurn('b')]);
+  let clock = new Date(NOW);
+  const service = new AssistantService({
+    store,
+    registry: createDefaultToolRegistry(),
+    client,
+    timezone: SINGAPORE,
+    now: () => clock,
+  });
+
+  await service.processMessage(1, 'first');
+  clock = new Date(NOW.getTime() + 3 * 3600_000); // three hours later
+  await service.processMessage(1, 'second');
+
+  assert.match(client.systemInstructions[0]!, /09:00/);
+  assert.match(client.systemInstructions[1]!, /12:00/);
+});
+
+test('tool output is never replayed into the stored conversation', async () => {
+  // Live tool data (the time, the reminder list) must not become history: a
+  // replayed timestamp is a lie the model will happily repeat.
+  const { service, store, client } = makeService([
+    callTurn({ id: 'c1', name: 'current_time' }),
+    callTurn({ id: 'c2', name: 'save_fact', args: { key: 'k', value: 'v' } }),
+    textTurn('Done.'),
+  ]);
+
+  const first = await service.processMessage(1, 'remember k');
+  assert.equal(first.kind, 'confirmation');
+  if (first.kind !== 'confirmation') return;
+
+  await service.approvePendingAction(1, first.confirmation.id);
+
+  // The request that resumed the loop must not contain the earlier time result.
+  const resumed = client.calls[2];
+  const toolMessages = resumed.filter((message) => message.role === 'tool');
+  assert.equal(toolMessages.length, 1, 'only the confirmed call result is present');
+  assert.match(toolMessages[0].content, /Saved fact/, 'and it is the write result');
+
+  // Nor is it in the persisted history.
+  const history = await store.getRecentMessages(1, 20);
+  assert.ok(history.every((message) => !message.content.includes('Local time:')));
 });

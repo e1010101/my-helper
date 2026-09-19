@@ -29,10 +29,14 @@ export interface AIClient {
   /**
    * One model turn. The registry supplies the tools the model may call; it is
    * typed loosely to keep this contract free of a circular import.
+   *
+   * `systemInstruction` is per-request because it carries the current time,
+   * which must not go stale.
    */
   generate(
     messages: AgentMessage[],
-    registry?: { list(): unknown[]; toFunctionDeclarations(): unknown[] }
+    registry?: { list(): unknown[]; toFunctionDeclarations(): unknown[] },
+    systemInstruction?: string
   ): Promise<ModelTurn>;
   /** Plain one-shot completion with no history or tools. */
   generateText(prompt: string): Promise<string>;

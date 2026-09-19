@@ -1,3 +1,4 @@
+import { env } from '../config/env.js';
 import { logger } from './logger.js';
 import type { AssistantStore } from './assistant-store.js';
 import type { AIClient, AgentMessage } from './ai-client.js';
@@ -121,15 +122,31 @@ export class AssistantService {
 
     await this.store.deletePendingAction(actionId);
 
-    // Replay the original assistant turn plus the tool result so the model can
-    // explain what happened in context.
+    // Rebuild the paused turn explicitly rather than replaying the stored one.
+    // Providers reject a tool result whose matching assistant `tool_calls`
+    // message is absent, and SanitizeForHistory strips tool traffic from what
+    // was stored, so the assistant turn is recreated here from the recorded
+    // tool name and arguments.
+    const callId = confirmedCallId(actionId);
+    const agentHistory = (action.modelParts as AgentMessage[])
+      .filter((message) => message.role !== 'tool')
+      .map((message) => {
+        if (message.role !== 'assistant') {
+          return message;
+        }
+        // Re-emit without toolCalls: those calls have no results in this
+        // branch, and an unanswered call is rejected by chat APIs.
+        return { role: 'assistant' as const, content: message.content };
+      });
+
     const messages: AgentMessage[] = [
-      ...(action.modelParts as AgentMessage[]),
+      ...agentHistory,
       {
-        role: 'tool',
-        toolCallId: this.toolCallIdFor(action.modelParts as AgentMessage[], action.toolName),
-        content: result,
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: callId, name: action.toolName, args: action.args }],
       },
+      { role: 'tool', toolCallId: callId, content: result },
     ];
 
     return await this.runLoop(userId, messages, this.now());
@@ -175,24 +192,15 @@ export class AssistantService {
     }
   }
 
-  /** Finds the id of the write call that was paused for confirmation. */
-  private toolCallIdFor(messages: AgentMessage[], toolName: string): string {
-    for (const message of messages) {
-      if (message.role === 'assistant' && message.toolCalls) {
-        const match = message.toolCalls.find((call) => call.name === toolName);
-        if (match) {
-          return match.id;
-        }
-      }
-    }
-    return toolName;
-  }
-
-  private async runLoop(userId: number, messages: AgentMessage[], now: Date): Promise<ConversationReply> {
+  private async runLoop(userId: number, modelMessages: AgentMessage[], now: Date): Promise<ConversationReply> {
     const context: ToolContext = { userId, store: this.store, timezone: this.timezone, now };
+    // Live time context for this turn. Regenerated per request so it cannot go
+    // stale, and deliberately not persisted into the stored conversation.
+    const systemInstruction = env.systemInstruction(now, this.timezone);
+    const messages: AgentMessage[] = [...modelMessages];
 
     for (let iteration = 0; iteration < this.maxToolIterations; iteration++) {
-      const turn = await this.client.generate(messages, this.registry);
+      const turn = await this.client.generate(messages, this.registry, systemInstruction);
 
       if (turn.toolCalls.length === 0) {
         const text = turn.text.trim() || DEGRADED_REPLY;
@@ -240,8 +248,9 @@ export class AssistantService {
           toolName: primary.tool.name,
           args: primary.args,
           // The assistant turn that requested the call, so the loop can resume
-          // in context after the user confirms.
-          modelParts: [messages[messages.length - 1]],
+          // in context after the user confirms. Only the model messages that
+          // led here are stored: intermediate tool traffic is not persisted.
+          modelParts: sanitizeForHistory(modelMessages),
           expiresAt,
         });
 
@@ -276,6 +285,26 @@ export class AssistantService {
       logger.error('Failed to persist assistant message', error);
     }
   }
+}
+
+/**
+ * Id for the reconstructed tool call in a confirmed action. Chat APIs require
+ * the tool result to reference the id of the call it answers.
+ */
+function confirmedCallId(actionId: number): string {
+  return `call_confirmed_${actionId}`;
+}
+
+/**
+ * Drops tool traffic before a conversation is stored for replay.
+ *
+ * Tool output is live data: a `current_time` result replayed next turn is a
+ * stale timestamp, and a `list_reminders` result is a stale schedule. Feeding
+ * those back as history is how the model ends up quoting the wrong time, so
+ * only user and assistant messages are kept.
+ */
+function sanitizeForHistory(messages: AgentMessage[]): AgentMessage[] {
+  return messages.filter((message) => message.role !== 'tool');
 }
 
 function summarise(call: ValidatedCall): string {
