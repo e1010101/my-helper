@@ -6,6 +6,7 @@ import { db } from './services/database.js';
 import { HealthService } from './services/health.js';
 import { logger } from './services/logger.js';
 import { markdownToTelegramHtml, escapeHtml } from './utils/telegram-format.js';
+import { splitTelegramHtml } from './utils/telegram-chunk.js';
 import { SupabaseAssistantStore } from './services/supabase-assistant-store.js';
 import { AssistantService } from './services/assistant.js';
 import { ReminderScheduler } from './services/reminder-scheduler.js';
@@ -212,9 +213,32 @@ export class Bot {
       return;
     }
 
-    // Gemini answers in standard Markdown, which Telegram's legacy Markdown
-    // parser renders incorrectly, so convert to HTML instead.
-    await ctx.reply(markdownToTelegramHtml(reply.text), { parse_mode: 'HTML' });
+    // Models answer in standard Markdown, which Telegram's legacy Markdown
+    // parser renders incorrectly, so convert to HTML instead. Long answers are
+    // split: a single over-limit message is rejected outright, which would
+    // otherwise surface as a misleading "having trouble" error.
+    await this.sendLongHtml(ctx, markdownToTelegramHtml(reply.text));
+  }
+
+  /**
+   * Sends HTML that may exceed Telegram's message limit, continuing in
+   * follow-up messages. The first part is always sent even if a later one
+   * fails, so a partial answer still reaches the user.
+   */
+  private async sendLongHtml(ctx: Context, html: string): Promise<void> {
+    const chunks = splitTelegramHtml(html);
+
+    for (const chunk of chunks) {
+      try {
+        await ctx.reply(chunk, { parse_mode: 'HTML' });
+      } catch (error) {
+        logger.error('Failed to send part of a message', error);
+        if (chunks.length > 1) {
+          await ctx.reply('⚠️ Part of my answer could not be delivered.').catch(() => undefined);
+        }
+        return;
+      }
+    }
   }
 
   private setupErrorHandling() {

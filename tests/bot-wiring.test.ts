@@ -303,6 +303,42 @@ test('/forget clears conversation memory only', async () => {
   assert.equal((await store.getFact(4242, 'home_city'))?.value, 'Singapore');
 });
 
+test('a reply longer than the message limit arrives in several parts', async () => {
+  // Without chunking this send is rejected by Telegram, and the failure lands
+  // in the handler's catch — so the user sees "having trouble" instead of the
+  // answer. The model is fine; the transport was the problem.
+  const longAnswer = `**Report**\n\n${'word '.repeat(2000)}`;
+  scriptText(longAnswer);
+
+  apiCalls.length = 0;
+  await sendText('give me a long answer');
+
+  const parts = messages();
+  assert.ok(parts.length > 1, `expected several messages, got ${parts.length}`);
+
+  const limit = /<[^>]+>|&(?:#\d{1,7}|#x[0-9a-fA-F]{1,6}|[a-zA-Z][a-zA-Z0-9]{1,31});/g;
+  for (const part of parts) {
+    // Telegram counts visible characters: markup does not contribute.
+    const visible = part.replace(limit, '').length;
+    assert.ok(visible <= 4096, `part of ${visible} visible characters exceeds the limit`);
+  }
+
+  assert.ok(
+    parts.join('').includes('word'),
+    'the answer body survived the split'
+  );
+});
+
+test('a normal-length reply is still sent as a single message', async () => {
+  scriptText('A short answer.');
+
+  apiCalls.length = 0;
+  await sendText('short question');
+
+  assert.equal(messages().length, 1, 'no unnecessary splitting');
+  assert.match(lastMessage(), /A short answer/);
+});
+
 test('polling mode starts the reminder scheduler even though launch() never resolves', async () => {
   // Regression test: Telegraf's launch() returns the long-poll loop promise, so
   // it does not settle while polling. Awaiting it blocked everything after it,
