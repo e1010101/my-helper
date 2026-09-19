@@ -61,7 +61,8 @@ This guide explains how to deploy your bot for 24/7 operation and set up compreh
 6. **Verify deployment:**
    - Check the **Deployments** tab for logs
    - Look for "✅ Bot is running!" in the logs
-   - Visit `https://your-domain.railway.app/health` to see health status
+   - Visit `https://your-domain.railway.app/ready` to confirm the assistant can work
+     (this one includes a database write probe; `/health` only checks liveness)
 
 ### Step 3: Test Your Bot
 

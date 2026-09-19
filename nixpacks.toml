@@ -1,5 +1,7 @@
 [phases.setup]
-nixPkgs = ["nodejs_18"]
+# Node 18 reached end-of-life in April 2025 and no longer receives security
+# patches, which is a poor fit for a service that runs continuously.
+nixPkgs = ["nodejs_22"]
 
 [phases.install]
 cmds = ["npm ci"]

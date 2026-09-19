@@ -27,13 +27,13 @@ A powerful, extensible Telegram bot for personal assistance, built with TypeScri
 - **Database:** [Supabase](https://supabase.com/) (PostgreSQL)
 - **AI:** [DeepSeek](https://platform.deepseek.com/) (`deepseek-chat`) by default; Google Gemini also supported via `AI_PROVIDER`
 - **Hosting:** [Railway.app](https://railway.app/) (recommended, free tier available)
-- **Runtime:** Node.js 18+
+- **Runtime:** Node.js 20+
 
 ## 🚀 Quick Start
 
 ### 1. Prerequisites
 
-- Node.js 18 or higher
+- Node.js 20 or higher
 - A Telegram account
 - A Supabase account (free tier is sufficient)
 
@@ -307,8 +307,13 @@ Do **not** set the port yourself: Railway injects `PORT`, and the bot prefers it
 The bot includes comprehensive monitoring features:
 
 ### Health Endpoint
-- **URL:** `https://your-domain.railway.app/health` (the bare `/` responds too)
-- Returns JSON with bot status, uptime, memory usage, and database connectivity
+- **`/health`** (and `/`) — liveness. Returns 200 while the process is serving and can
+  reach Telegram. A database outage is reported in the body but does not fail this
+  check, because restarting cannot repair a database and a crash loop would take the
+  bot down rather than degrade it. This is what Railway's healthcheck uses.
+- **`/ready`** — readiness. Returns 503 unless the database is genuinely writable
+  (verified with a write probe, since RLS makes reads look fine when they are not).
+  Use this one for UptimeRobot or any external monitor.
 - Reports `unhealthy` (HTTP 503) if the Telegram API or any required table is unreachable
 - Use with UptimeRobot or Better Uptime for 24/7 monitoring
 

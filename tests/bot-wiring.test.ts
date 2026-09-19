@@ -339,6 +339,69 @@ test('a normal-length reply is still sent as a single message', async () => {
   assert.match(lastMessage(), /A short answer/);
 });
 
+test('/health and /ready answer different questions', async () => {
+  // Regression guard: a database outage must not fail the platform's liveness
+  // check. Restarting cannot repair the database, and a crash loop would take
+  // the bot down entirely rather than degrading.
+  const target = new Bot();
+  const healthService = (target as unknown as {
+    healthService: {
+      getHealthStatus(): Promise<Record<string, unknown>>;
+    };
+  }).healthService;
+
+  const httpServer = (target as unknown as {
+    createHttpServer(): import('http').Server;
+  }).createHttpServer();
+
+  await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', resolve));
+  const address = httpServer.address();
+  const port = typeof address === 'object' && address ? address.port : 0;
+
+  const status = async (path: string) => {
+    const res = await fetch(`http://127.0.0.1:${port}${path}`);
+    return { code: res.status, body: (await res.json()) as Record<string, unknown> };
+  };
+
+  try {
+    // Telegram reachable, database broken.
+    healthService.getHealthStatus = async () => ({
+      status: 'unhealthy',
+      bot: { connected: true, mode: 'webhook' },
+      database: { connected: false, error: 'cannot write to the assistant tables' },
+    });
+
+    const healthDown = await status('/health');
+    assert.equal(healthDown.code, 200, 'liveness must pass while the bot can still serve');
+    assert.equal(healthDown.body.check, 'health');
+
+    const readyDown = await status('/ready');
+    assert.equal(readyDown.code, 503, 'readiness must fail while the database is unusable');
+    assert.equal(readyDown.body.check, 'ready');
+
+    // Both healthy.
+    healthService.getHealthStatus = async () => ({
+      status: 'healthy',
+      bot: { connected: true, mode: 'webhook' },
+      database: { connected: true, latency: 5 },
+    });
+    assert.equal((await status('/health')).code, 200);
+    assert.equal((await status('/ready')).code, 200);
+
+    // Telegram unreachable: a restart genuinely might help, so both fail.
+    healthService.getHealthStatus = async () => ({
+      status: 'unhealthy',
+      bot: { connected: false, mode: 'webhook' },
+      database: { connected: true },
+    });
+    assert.equal((await status('/health')).code, 503);
+    assert.equal((await status('/ready')).code, 503);
+  } finally {
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    target.dispose();
+  }
+});
+
 test('polling mode starts the reminder scheduler even though launch() never resolves', async () => {
   // Regression test: Telegraf's launch() returns the long-poll loop promise, so
   // it does not settle while polling. Awaiting it blocked everything after it,

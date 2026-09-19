@@ -384,8 +384,8 @@ import { Bot } from './bot.js';
    - All dependencies listed
 
 3. **Check Node version:**
-   - Railway uses Node 18 by default
-   - Matches `engines` in package.json
+   - `nixpacks.toml` pins the Node version used on Railway
+   - It must satisfy `engines` in package.json (currently Node 20+)
 
 ### App Crashed After Deploy
 

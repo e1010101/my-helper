@@ -269,16 +269,27 @@ export class Bot {
   }
 
   /**
-   * Serves the health endpoint (and the bare root, which some platform
-   * healthchecks probe) so both polling and webhook modes stay observable.
+   * Liveness/readiness endpoints, deliberately separate.
+   *
+   * `/health` answers "should the platform keep this process running": the
+   * Telegram connection is the only thing a restart can actually fix. A
+   * database outage is reported in the body but does not fail the check,
+   * because restarting cannot repair it and a crash loop would take the bot
+   * down entirely — losing messages and reminders instead of degrading.
+   *
+   * `/ready` answers "can the assistant work right now", including the database
+   * write probe, and is the one for external monitors.
    */
-  private async handleHealthRequest(res: ServerResponse): Promise<void> {
+  private async handleHealthRequest(res: ServerResponse, path: string): Promise<void> {
     try {
       const health = await this.healthService.getHealthStatus();
-      res.writeHead(health.status === 'healthy' ? 200 : 503, {
-        'Content-Type': 'application/json',
-      });
-      res.end(JSON.stringify(health, null, 2));
+
+      const healthy = path === '/ready'
+        ? health.status === 'healthy'
+        : health.bot.connected;
+
+      res.writeHead(healthy ? 200 : 503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ...health, check: path === '/ready' ? 'ready' : 'health' }, null, 2));
     } catch (error) {
       logger.error('Health check failed', error);
       res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -290,8 +301,8 @@ export class Bot {
     const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
       const path = (req.url || '/').split('?')[0];
 
-      if ((path === '/health' || path === '/') && req.method === 'GET') {
-        await this.handleHealthRequest(res);
+      if ((path === '/health' || path === '/' || path === '/ready') && req.method === 'GET') {
+        await this.handleHealthRequest(res, path);
         return;
       }
 
