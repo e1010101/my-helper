@@ -366,14 +366,22 @@ export class Bot {
       const webhookUrl = `https://${domain}/webhook`;
       logger.info(`Starting bot in webhook mode on port ${port}`, { domain, webhookUrl });
 
-      // Tell Telegram about the endpoint. createWebhook() also registers the
-      // URL, so no separate setWebhook() call is needed (and no double request).
-      const webhookCallback = await this.retryOnRateLimit(
-        () => this.bot.createWebhook({
-          domain,
-          path: '/webhook',
+      // The request handler is built with webhookCallback rather than
+      // createWebhook because that is the documented place to pass secretToken,
+      // and secretToken is what Telegraf's request filter compares the
+      // X-Telegram-Bot-Api-Secret-Token header against. Without it the filter
+      // lets every request through, so anyone who learned the URL could POST
+      // forged updates and drive the assistant.
+      const webhookCallback = this.bot.webhookCallback('/webhook', {
+        ...(secretToken ? { secretToken } : {}),
+      }) as WebhookCallback;
+
+      // Register the URL with Telegram. Retried on rate limiting, which is the
+      // only realistic failure here beyond an invalid token.
+      await this.retryOnRateLimit(() =>
+        this.bot.telegram.setWebhook(webhookUrl, {
           ...(secretToken ? { secret_token: secretToken } : {}),
-        }) as Promise<WebhookCallback>
+        })
       );
 
       // Verify the API credentials are usable before declaring success.
