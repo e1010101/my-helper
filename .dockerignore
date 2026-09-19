@@ -1,0 +1,27 @@
+# Keep the build context small and, more importantly, keep secrets out of it.
+# These are ignored by .gitignore too, but a Docker build context is sent to
+# the daemon regardless, so they must be excluded explicitly.
+
+node_modules
+dist
+npm-debug.log*
+
+# Never publish credentials into an image layer.
+.env
+.env.*
+!.env.example
+
+.git
+.gitignore
+.github
+
+# Local tooling and scratch state.
+.npm-cache
+.cache
+.vscode
+.idea
+
+# Docs and tests are not needed to run the bot.
+docs
+tests
+*.md

@@ -203,6 +203,11 @@ re-runnable.
 4. For webhook mode: set `WEBHOOK_DOMAIN` to your Railway domain and `WEBHOOK_SECRET`
    to a random `A-Za-z0-9_-` string
 
+**Docker:** a multi-stage `Dockerfile` builds the same app for any container host.
+`.dockerignore` excludes `.env*` so credentials cannot reach an image layer, the image
+runs as the unprivileged `node` user, and its `HEALTHCHECK` deliberately probes
+`/health` (liveness) rather than `/ready`, matching the reasoning above.
+
 **Ports:** Railway injects `PORT`; the bot prefers it over `WEBHOOK_PORT`
 (default 3000). Do not hardcode a port.
 

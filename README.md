@@ -271,6 +271,35 @@ npm test            # Run the test suites
 
 ## 🌐 Deployment
 
+### Docker (any host)
+
+A `Dockerfile` is included, so the bot runs identically on Railway, Fly.io, or your own
+machine. The build is multi-stage: devDependencies and TypeScript stay out of the
+runtime image, and `.dockerignore` keeps `.env` out of the build context so credentials
+never land in a layer.
+
+```bash
+docker build -t my-helper-bot .
+docker run -d --name my-helper \
+  --env-file .env.railway \
+  --restart unless-stopped \
+  -p 3000:3000 \
+  my-helper-bot
+```
+
+`--restart unless-stopped` is what makes it survive crashes and reboots. The image
+defines a `HEALTHCHECK` against `/health` (liveness only — a database outage must not
+mark the container dead), and runs as the unprivileged `node` user.
+
+To produce the Railway/Fly variable set from your local `.env`:
+
+```bash
+# .env.railway is gitignored — it holds real secrets
+```
+
+It deliberately excludes `DATABASE_URL`, which is only needed for `npm run db:migrate`
+from your machine.
+
 ### Railway.app (Recommended)
 
 Railway offers a generous free tier perfect for personal bots.
