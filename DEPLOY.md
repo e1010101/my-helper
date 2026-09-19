@@ -43,6 +43,9 @@ git push -u origin main
    ADMIN_USER_ID=your_telegram_user_id
    SUPABASE_URL=your_supabase_project_url
    SUPABASE_ANON_KEY=your_supabase_anon_key
+   SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
+   GEMINI_API_KEY=your_gemini_api_key
+   TIMEZONE=Asia/Singapore
    NODE_ENV=production
    ```
 
@@ -56,8 +59,11 @@ git push -u origin main
    Add two more variables:
    ```
    WEBHOOK_DOMAIN=my-helper-production.up.railway.app
-   WEBHOOK_PORT=3000
+   WEBHOOK_SECRET=some_long_random_a-z0-9_-_string
    ```
+
+   Don't set a port yourself — Railway injects `PORT` and the bot prefers it over
+   `WEBHOOK_PORT`.
 
 6. **Wait for deployment:**
    - Check **Deployments** tab

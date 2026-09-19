@@ -35,6 +35,10 @@ Railway offers the best balance of ease-of-use and cost-effectiveness for person
      TELEGRAM_BOT_TOKEN=your_bot_token
      SUPABASE_URL=your_supabase_url
      SUPABASE_ANON_KEY=your_supabase_key
+     SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
+     GEMINI_API_KEY=your_gemini_api_key
+     ADMIN_USER_ID=your_telegram_user_id
+     TIMEZONE=Asia/Singapore
      NODE_ENV=production
      ```
 
@@ -43,9 +47,12 @@ Railway offers the best balance of ease-of-use and cost-effectiveness for person
    - Add these variables:
      ```
      WEBHOOK_DOMAIN=your-app.railway.app
-     WEBHOOK_PORT=3000
+     WEBHOOK_SECRET=some_long_random_a-z0-9_-_string
      ```
    - Redeploy
+   - Leave the port alone: Railway injects `PORT` and the bot uses it (falling back to
+     `WEBHOOK_PORT`, default 3000). The server binds to `0.0.0.0` so the platform
+     healthcheck at `/health` can reach it.
 
 5. **Deploy**
    - Railway automatically detects Node.js and runs `npm install && npm start`

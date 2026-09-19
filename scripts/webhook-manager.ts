@@ -11,29 +11,115 @@ if (!BOT_TOKEN) {
 
 const API_BASE = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-async function getWebhookInfo() {
-  const response = await fetch(`${API_BASE}/getWebhookInfo`);
-  const data = await response.json();
-  return data;
+/** Telegram only accepts these characters in a webhook secret token. */
+const SECRET_PATTERN = /^[A-Za-z0-9_-]{1,256}$/;
+
+interface TelegramApiResponse<T> {
+  ok: boolean;
+  result?: T;
+  description?: string;
 }
 
-async function deleteWebhook() {
-  const response = await fetch(`${API_BASE}/deleteWebhook`);
-  const data = await response.json();
-  return data;
+interface WebhookInfo {
+  url?: string;
+  pending_update_count?: number;
+  last_error_message?: string;
 }
 
-async function setWebhook(url: string) {
-  const response = await fetch(`${API_BASE}/setWebhook`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url }),
-  });
-  const data = await response.json();
-  return data;
+async function callTelegram<T>(method: string, body?: Record<string, unknown>): Promise<TelegramApiResponse<T>> {
+  const response = await fetch(`${API_BASE}/${method}`, body
+    ? {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }
+    : undefined);
+
+  return await response.json() as TelegramApiResponse<T>;
 }
 
-async function main() {
+function resolveSecretToken(): string | undefined {
+  const secret = process.env.WEBHOOK_SECRET?.trim();
+  if (!secret) {
+    return undefined;
+  }
+  if (!SECRET_PATTERN.test(secret)) {
+    console.error('❌ WEBHOOK_SECRET is invalid: use only A-Z, a-z, 0-9, "_" and "-" (max 256 chars)');
+    process.exit(1);
+  }
+  return secret;
+}
+
+async function showWebhookInfo(): Promise<void> {
+  console.log('Checking webhook status...\n');
+  const info = await callTelegram<WebhookInfo>('getWebhookInfo');
+
+  if (!info.ok || !info.result) {
+    console.error('❌ Error:', info.description || 'unknown error');
+    return;
+  }
+
+  console.log('✅ Webhook Info:');
+  console.log(`   URL: ${info.result.url || '(not set)'}`);
+  console.log(`   Pending updates: ${info.result.pending_update_count || 0}`);
+  console.log(`   Last error: ${info.result.last_error_message || 'none'}`);
+
+  if (info.result.url) {
+    console.log('\n⚠️  Webhook is active. Local polling mode will not work.');
+    console.log('   Run: npm run webhook:delete');
+  } else {
+    console.log('\n✅ No webhook set. Polling mode will work.');
+  }
+}
+
+async function removeWebhook(): Promise<void> {
+  console.log('Deleting webhook...\n');
+  const result = await callTelegram<boolean>('deleteWebhook');
+
+  if (result.ok) {
+    console.log('✅ Webhook deleted successfully!');
+    console.log('   You can now run the bot locally with: npm run dev');
+  } else {
+    console.error('❌ Error:', result.description || 'unknown error');
+  }
+}
+
+async function registerWebhook(url: string): Promise<void> {
+  const secret = resolveSecretToken();
+  console.log(`Setting webhook to: ${url}\n`);
+
+  if (secret) {
+    console.log('Using WEBHOOK_SECRET from environment.\n');
+  } else {
+    console.log('⚠️  WEBHOOK_SECRET is not set: /webhook will accept unauthenticated requests.\n');
+  }
+
+  const result = await callTelegram<boolean>('setWebhook', secret ? { url, secret_token: secret } : { url });
+
+  if (result.ok) {
+    console.log('✅ Webhook set successfully!');
+    console.log('   Your bot will now receive updates via webhook.');
+    console.log('   Local polling mode will NOT work while webhook is active.');
+    if (secret) {
+      console.log('   Remember to set the same WEBHOOK_SECRET in your hosting environment.');
+    }
+  } else {
+    console.error('❌ Error:', result.description || 'unknown error');
+  }
+}
+
+function printUsage(): void {
+  console.log('Usage:');
+  console.log('  npm run webhook:info    - Check current webhook status');
+  console.log('  npm run webhook:delete  - Delete webhook (enable polling)');
+  console.log('  npm run webhook:set URL - Set webhook URL');
+  console.log('\nExamples:');
+  console.log('  npm run webhook:info');
+  console.log('  npm run webhook:delete');
+  console.log('  npm run webhook:set https://my-bot.railway.app/webhook');
+}
+
+async function main(): Promise<void> {
   const command = process.argv[2];
 
   console.log('🤖 Telegram Webhook Manager\n');
@@ -41,64 +127,31 @@ async function main() {
   switch (command) {
     case 'info':
     case 'check':
-      console.log('Checking webhook status...\n');
-      const info = await getWebhookInfo();
-      if (info.ok) {
-        console.log('✅ Webhook Info:');
-        console.log(`   URL: ${info.result.url || '(not set)'}`);
-        console.log(`   Pending updates: ${info.result.pending_update_count || 0}`);
-        console.log(`   Last error: ${info.result.last_error_message || 'none'}`);
-        if (info.result.url) {
-          console.log('\n⚠️  Webhook is active. Local polling mode will not work.');
-          console.log('   Run: npm run webhook:delete');
-        } else {
-          console.log('\n✅ No webhook set. Polling mode will work.');
-        }
-      } else {
-        console.error('❌ Error:', info.description);
-      }
+      await showWebhookInfo();
       break;
 
     case 'delete':
     case 'remove':
-      console.log('Deleting webhook...\n');
-      const deleteResult = await deleteWebhook();
-      if (deleteResult.ok) {
-        console.log('✅ Webhook deleted successfully!');
-        console.log('   You can now run the bot locally with: npm run dev');
-      } else {
-        console.error('❌ Error:', deleteResult.description);
-      }
+      await removeWebhook();
       break;
 
-    case 'set':
+    case 'set': {
       const url = process.argv[3];
       if (!url) {
         console.error('❌ Please provide a webhook URL');
         console.log('   Usage: npm run webhook:set https://your-domain.railway.app/webhook');
         process.exit(1);
       }
-      console.log(`Setting webhook to: ${url}\n`);
-      const setResult = await setWebhook(url);
-      if (setResult.ok) {
-        console.log('✅ Webhook set successfully!');
-        console.log('   Your bot will now receive updates via webhook.');
-        console.log('   Local polling mode will NOT work while webhook is active.');
-      } else {
-        console.error('❌ Error:', setResult.description);
-      }
+      await registerWebhook(url);
       break;
+    }
 
     default:
-      console.log('Usage:');
-      console.log('  npm run webhook:info    - Check current webhook status');
-      console.log('  npm run webhook:delete  - Delete webhook (enable polling)');
-      console.log('  npm run webhook:set URL - Set webhook URL');
-      console.log('\nExamples:');
-      console.log('  npm run webhook:info');
-      console.log('  npm run webhook:delete');
-      console.log('  npm run webhook:set https://my-bot.railway.app/webhook');
+      printUsage();
   }
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error('❌ Unexpected error:', error);
+  process.exit(1);
+});

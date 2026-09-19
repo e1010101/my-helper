@@ -20,10 +20,13 @@ dist/
 .DS_Store
 Thumbs.db
 
-# Logs
+# Logs and captured command output (scratch files, not source)
 logs/
 *.log
 npm-debug.log*
+*_logs.txt
+*_output.txt
+*_errors.txt
 
 # Testing
 coverage/
@@ -31,7 +34,4 @@ coverage/
 
 # Misc
 .cache/
-
-# Local Codex generated artifacts
-.codex-schema/
-.codex-ts/
+.npm-cache/

@@ -2,24 +2,45 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-interface Config {
-  telegram: {
-    token: string;
-  };
-  supabase: {
-    url: string;
-    anonKey: string;
-  };
-  gemini: {
-    apiKey: string;
-    personalityPrompt: string;
-  };
-  webhook?: {
-    domain: string;
-    port: number;
-  };
-  nodeEnv: string;
+export interface TelegramConfig {
+  token: string;
 }
+
+export interface SupabaseConfig {
+  url: string;
+  /** Public key. Safe to expose, honours Row Level Security. */
+  anonKey: string;
+  /**
+   * Secret key. Bypasses RLS, so it is only used server-side to reach the
+   * locked-down tables (credentials, conversations, facts, reminders).
+   * Optional at boot so a missing key surfaces as an actionable health error
+   * rather than a crash.
+   */
+  serviceRoleKey?: string;
+}
+
+export interface GeminiConfig {
+  apiKey: string;
+  personalityPrompt: string;
+}
+
+export interface DeepSeekConfig {
+  apiKey: string;
+  model: string;
+}
+
+/** Which model provider to use when more than one key is configured. */
+export type AIProviderName = 'gemini' | 'deepseek';
+
+export interface WebhookConfig {
+  domain: string;
+  port: number;
+  secretToken?: string;
+}
+
+const DEFAULT_PORT = 3000;
+const DEFAULT_PERSONALITY =
+  'You are a helpful and friendly personal assistant bot for Telegram. Provide concise and useful answers.';
 
 function getEnvVar(key: string): string {
   const value = process.env[key];
@@ -29,23 +50,159 @@ function getEnvVar(key: string): string {
   return value;
 }
 
-export const config: Config = {
-  telegram: {
-    token: getEnvVar('TELEGRAM_BOT_TOKEN'),
-  },
-  supabase: {
-    url: getEnvVar('SUPABASE_URL'),
-    anonKey: getEnvVar('SUPABASE_ANON_KEY'),
-  },
-  gemini: {
-    apiKey: getEnvVar('GEMINI_API_KEY'),
-    personalityPrompt: process.env.BOT_PERSONALITY_PROMPT || 'You are a helpful and friendly personal assistant bot for Telegram. Provide concise and useful answers.',
-  },
-  webhook: process.env.WEBHOOK_DOMAIN
-    ? {
-      domain: process.env.WEBHOOK_DOMAIN,
-      port: parseInt(process.env.WEBHOOK_PORT || '3000', 10),
+/**
+ * Resolves a port from an optional environment variable, falling back to the
+ * next candidate. Hosting platforms (Railway, Heroku, Fly) inject PORT, so it
+ * takes precedence over the project-specific WEBHOOK_PORT.
+ */
+function resolvePort(...candidates: (string | undefined)[]): number {
+  for (const candidate of candidates) {
+    if (!candidate) {
+      continue;
     }
-    : undefined,
-  nodeEnv: process.env.NODE_ENV || 'development',
+    const parsed = Number.parseInt(candidate, 10);
+    if (Number.isInteger(parsed) && parsed > 0 && parsed <= 65535) {
+      return parsed;
+    }
+  }
+  return DEFAULT_PORT;
+}
+
+function resolveTimezone(): string {
+  const configured = process.env.TIMEZONE?.trim();
+  if (configured) {
+    return configured;
+  }
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+}
+
+/**
+ * Environment access is lazy on purpose: reading configuration is what
+ * validates it, so modules can be imported by tests and tooling without a
+ * fully populated environment.
+ */
+export const env = {
+  telegram(): TelegramConfig {
+    return { token: getEnvVar('TELEGRAM_BOT_TOKEN') };
+  },
+
+  supabase(): SupabaseConfig {
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+    return {
+      url: getEnvVar('SUPABASE_URL'),
+      anonKey: getEnvVar('SUPABASE_ANON_KEY'),
+      serviceRoleKey: serviceRoleKey || undefined,
+    };
+  },
+
+  gemini(): GeminiConfig {
+    return {
+      apiKey: getEnvVar('GEMINI_API_KEY'),
+      personalityPrompt: process.env.BOT_PERSONALITY_PROMPT || DEFAULT_PERSONALITY,
+    };
+  },
+
+  deepseek(): DeepSeekConfig {
+    return {
+      apiKey: getEnvVar('DEEPSEEK_API_KEY'),
+      model: process.env.DEEPSEEK_MODEL?.trim() || 'deepseek-chat',
+    };
+  },
+
+  /**
+   * Resolves the model provider from whichever key is configured.
+   * AI_PROVIDER wins when set; otherwise a single available key decides, and
+   * two keys without an explicit choice is an error rather than a coin flip.
+   */
+  aiProvider(): AIProviderName {
+    const explicit = process.env.AI_PROVIDER?.trim().toLowerCase();
+    if (explicit) {
+      if (explicit !== 'gemini' && explicit !== 'deepseek') {
+        throw new Error(`AI_PROVIDER must be "gemini" or "deepseek" (got "${explicit}")`);
+      }
+      return explicit;
+    }
+
+    const hasGemini = Boolean(process.env.GEMINI_API_KEY?.trim());
+    const hasDeepSeek = Boolean(process.env.DEEPSEEK_API_KEY?.trim());
+
+    if (hasDeepSeek && !hasGemini) {
+      return 'deepseek';
+    }
+    if (hasGemini && !hasDeepSeek) {
+      return 'gemini';
+    }
+    if (hasGemini && hasDeepSeek) {
+      throw new Error(
+        'Both GEMINI_API_KEY and DEEPSEEK_API_KEY are set. Choose one with AI_PROVIDER=gemini|deepseek.'
+      );
+    }
+    throw new Error('No model provider configured: set DEEPSEEK_API_KEY (or GEMINI_API_KEY).');
+  },
+
+  /** Personality prompt, independent of which provider is in use. */
+  personalityPrompt(): string {
+    return process.env.BOT_PERSONALITY_PROMPT || DEFAULT_PERSONALITY;
+  },
+
+  /**
+   * The system prompt for a given moment.
+   *
+   * The current time is injected rather than left to the model because it has
+   * no other way to know it: without this the model either invents a time or
+   * reuses one from earlier in the conversation, which makes relative requests
+   * like "in 2 minutes" silently wrong.
+   */
+  systemInstruction(now: Date = new Date(), timezone?: string): string {
+    const zone = timezone || resolveTimezone();
+    const formatted = new Intl.DateTimeFormat('en-GB', {
+      timeZone: zone,
+      weekday: 'long',
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(now);
+
+    return [
+      this.personalityPrompt(),
+      '',
+      `Current date and time: ${formatted} (${zone}).`,
+      'Treat that as the present moment for anything time-related.',
+      'For relative requests like "in 10 minutes" or "tomorrow", resolve them against it,',
+      'and call a tool to check the current time or scheduled reminders before telling the',
+      'user what is already scheduled or when something will happen.',
+    ].join('\n');
+  },
+
+  webhook(): WebhookConfig | undefined {
+    const domain = process.env.WEBHOOK_DOMAIN?.trim();
+    if (!domain) {
+      return undefined;
+    }
+    return {
+      domain,
+      port: resolvePort(process.env.PORT, process.env.WEBHOOK_PORT),
+      secretToken: process.env.WEBHOOK_SECRET?.trim() || undefined,
+    };
+  },
+
+  /** Port for the standalone HTTP server used in polling mode. */
+  port(): number {
+    return resolvePort(process.env.PORT, process.env.WEBHOOK_PORT);
+  },
+
+  timezone(): string {
+    return resolveTimezone();
+  },
+
+  nodeEnv(): string {
+    return process.env.NODE_ENV || 'development';
+  },
+
+  isProduction(): boolean {
+    return (process.env.NODE_ENV || 'development') === 'production';
+  },
 };

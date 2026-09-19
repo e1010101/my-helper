@@ -1,11 +1,46 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { config } from '../config/env.js';
+import { env } from '../config/env.js';
+
+export interface Task {
+  id: number;
+  user_id: number;
+  name: string;
+  description: string;
+  completed: boolean;
+  created_at: string;
+}
+
+export interface Prompt {
+  id: number;
+  user_id: number;
+  title: string;
+  prompt: string;
+  tags: string[];
+  image_file_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Postgres/Supabase error code for "no rows returned by .single()". */
+const NO_ROWS_CODE = 'PGRST116';
 
 export class DatabaseService {
   private client: SupabaseClient;
 
-  constructor() {
-    this.client = createClient(config.supabase.url, config.supabase.anonKey);
+  constructor(client?: SupabaseClient) {
+    if (client) {
+      this.client = client;
+      return;
+    }
+
+    const supabase = env.supabase();
+    // The service_role key bypasses RLS, which the locked-down tables require.
+    // Falling back to the anon key keeps older deployments booting, but those
+    // tables will reject the queries and the health check will say so.
+    this.client = createClient(
+      supabase.url,
+      supabase.serviceRoleKey || supabase.anonKey
+    );
   }
 
   getClient(): SupabaseClient {
@@ -62,7 +97,7 @@ export class DatabaseService {
     }
   }
 
-  async getTask(taskId: number, userId: number) {
+  async getTask(taskId: number, userId: number): Promise<Task | null> {
     const { data, error } = await this.client
       .from('tasks')
       .select('*')
@@ -70,7 +105,12 @@ export class DatabaseService {
       .eq('user_id', userId)
       .single();
 
+    // .single() errors when no row matches; that is an expected "not found",
+    // not a failure, so callers get null and can report it properly.
     if (error) {
+      if (error.code === NO_ROWS_CODE) {
+        return null;
+      }
       console.error('Error fetching task:', error);
       throw error;
     }
@@ -117,10 +157,10 @@ export class DatabaseService {
     }
   }
 
-  async getTasksByUser(userId: number, limit = 20) {
+  async getTasksByUser(userId: number, limit = 20): Promise<Task[]> {
     const { data, error } = await this.client
       .from('tasks')
-      .select('id, name, description, completed, created_at')
+      .select('id, user_id, name, description, completed, created_at')
       .eq('user_id', userId)
       .order('created_at', { ascending: false })
       .limit(limit);
@@ -154,10 +194,10 @@ export class DatabaseService {
     }
   }
 
-  async getPromptsByUser(userId: number, limit = 20) {
+  async getPromptsByUser(userId: number, limit = 20): Promise<Prompt[]> {
     const { data, error } = await this.client
       .from('prompts')
-      .select('id, title, prompt, tags, image_file_id, created_at, updated_at')
+      .select('id, user_id, title, prompt, tags, image_file_id, created_at, updated_at')
       .eq('user_id', userId)
       .order('created_at', { ascending: false })
       .limit(limit);
@@ -170,10 +210,10 @@ export class DatabaseService {
     return data || [];
   }
 
-  async searchPrompts(userId: number, titleQuery?: string, tagsQuery?: string[]) {
+  async searchPrompts(userId: number, titleQuery?: string, tagsQuery?: string[]): Promise<Prompt[]> {
     let query = this.client
       .from('prompts')
-      .select('id, title, prompt, tags, image_file_id, created_at, updated_at')
+      .select('id, user_id, title, prompt, tags, image_file_id, created_at, updated_at')
       .eq('user_id', userId);
 
     if (titleQuery) {
