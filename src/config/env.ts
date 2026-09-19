@@ -24,6 +24,14 @@ export interface GeminiConfig {
   personalityPrompt: string;
 }
 
+export interface DeepSeekConfig {
+  apiKey: string;
+  model: string;
+}
+
+/** Which model provider to use when more than one key is configured. */
+export type AIProviderName = 'gemini' | 'deepseek';
+
 export interface WebhookConfig {
   domain: string;
   port: number;
@@ -92,6 +100,49 @@ export const env = {
       apiKey: getEnvVar('GEMINI_API_KEY'),
       personalityPrompt: process.env.BOT_PERSONALITY_PROMPT || DEFAULT_PERSONALITY,
     };
+  },
+
+  deepseek(): DeepSeekConfig {
+    return {
+      apiKey: getEnvVar('DEEPSEEK_API_KEY'),
+      model: process.env.DEEPSEEK_MODEL?.trim() || 'deepseek-chat',
+    };
+  },
+
+  /**
+   * Resolves the model provider from whichever key is configured.
+   * AI_PROVIDER wins when set; otherwise a single available key decides, and
+   * two keys without an explicit choice is an error rather than a coin flip.
+   */
+  aiProvider(): AIProviderName {
+    const explicit = process.env.AI_PROVIDER?.trim().toLowerCase();
+    if (explicit) {
+      if (explicit !== 'gemini' && explicit !== 'deepseek') {
+        throw new Error(`AI_PROVIDER must be "gemini" or "deepseek" (got "${explicit}")`);
+      }
+      return explicit;
+    }
+
+    const hasGemini = Boolean(process.env.GEMINI_API_KEY?.trim());
+    const hasDeepSeek = Boolean(process.env.DEEPSEEK_API_KEY?.trim());
+
+    if (hasDeepSeek && !hasGemini) {
+      return 'deepseek';
+    }
+    if (hasGemini && !hasDeepSeek) {
+      return 'gemini';
+    }
+    if (hasGemini && hasDeepSeek) {
+      throw new Error(
+        'Both GEMINI_API_KEY and DEEPSEEK_API_KEY are set. Choose one with AI_PROVIDER=gemini|deepseek.'
+      );
+    }
+    throw new Error('No model provider configured: set DEEPSEEK_API_KEY (or GEMINI_API_KEY).');
+  },
+
+  /** Personality prompt, independent of which provider is in use. */
+  personalityPrompt(): string {
+    return process.env.BOT_PERSONALITY_PROMPT || DEFAULT_PERSONALITY;
   },
 
   webhook(): WebhookConfig | undefined {

@@ -9,7 +9,7 @@ A powerful, extensible Telegram bot for personal assistance, built with TypeScri
 - ⏰ **Reminders** - "remind me in 30 minutes", "every Monday at 9am", with timezone-correct scheduling
 - 🤝 **Confirm-before-write** - The assistant proposes actions; nothing changes your data until you tap Confirm
 - 📝 **Task Capture** - Create, edit and persist to-do tasks
-- 💬 **AI Chat** - Free-form messages are answered by Gemini, with tools for your own data
+- 💬 **AI Chat** - Free-form messages are answered by a configurable model (DeepSeek by default), with tools for your own data
 - 📄 **Prompt Library** - Save prompt templates with tags and an image, then search them
 - 🚀 **Fast** - Built with Telegraf, one of the fastest Telegram bot frameworks
 - 🔧 **Extensible** - Easy-to-add command system
@@ -25,7 +25,7 @@ A powerful, extensible Telegram bot for personal assistance, built with TypeScri
 - **Language:** TypeScript
 - **Bot Framework:** [Telegraf](https://telegraf.js.org/)
 - **Database:** [Supabase](https://supabase.com/) (PostgreSQL)
-- **AI:** [Google Gemini](https://ai.google.dev/) (`gemini-2.5-flash`) via `@google/genai`
+- **AI:** [DeepSeek](https://platform.deepseek.com/) (`deepseek-chat`) by default; Google Gemini also supported via `AI_PROVIDER`
 - **Hosting:** [Railway.app](https://railway.app/) (recommended, free tier available)
 - **Runtime:** Node.js 18+
 
@@ -97,7 +97,7 @@ npm start
 
 ### Talking to the assistant
 
-Any plain text message is handled by Gemini, which can call tools against your own data:
+Any plain text message is handled by the configured model, which can call tools against your own data:
 
 | You say | What happens |
 | --- | --- |
@@ -111,6 +111,22 @@ questions are answered directly. Confirmations expire after 10 minutes.
 
 Reminders are stored in Postgres and polled by a scheduler, so they survive restarts;
 a reminder that came due while the bot was offline is delivered marked "(missed earlier)".
+
+### Model providers
+
+The assistant speaks to whichever provider you configure:
+
+```ini
+DEEPSEEK_API_KEY=...      # default provider
+DEEPSEEK_MODEL=deepseek-chat
+# GEMINI_API_KEY=...      # alternative
+AI_PROVIDER=deepseek      # optional; inferred when only one key is set
+```
+
+`deepseek-chat` is the default because the assistant tools require **function calling**.
+If both keys are set without `AI_PROVIDER`, startup fails rather than silently guessing.
+Adding another provider means implementing the `AIClient` interface in
+`src/services/ai-client.ts`.
 
 ### `/task` Usage
 
@@ -267,9 +283,11 @@ Railway offers a generous free tier perfect for personal bots.
    - `TELEGRAM_BOT_TOKEN`
    - `SUPABASE_URL`
    - `SUPABASE_ANON_KEY`
-   - `GEMINI_API_KEY`
+   - `SUPABASE_SERVICE_ROLE_KEY`
+   - `DEEPSEEK_API_KEY`
    - `NODE_ENV=production`
    - `ADMIN_USER_ID` (your Telegram user ID from @userinfobot)
+   - `TIMEZONE` (e.g. `Asia/Singapore`)
 6. Railway will automatically deploy your bot
 
 For webhook mode (more efficient than polling):

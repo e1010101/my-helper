@@ -15,11 +15,18 @@ import { dirname, join } from 'node:path';
 import { InMemoryAssistantStore } from '../src/services/in-memory-assistant-store.js';
 
 process.env.NODE_ENV = 'production'; // keep the logger quiet
+// The sandbox blocks binding 3000, and start() opens a real health server.
+process.env.PORT = '3399';
 process.env.TELEGRAM_BOT_TOKEN = '123456:FAKE_TOKEN_FOR_TESTS';
 // Unroutable on purpose: makes the Supabase-backed store fail deterministically.
 process.env.SUPABASE_URL = 'http://127.0.0.1:1';
 process.env.SUPABASE_ANON_KEY = 'fake-anon-key';
-process.env.GEMINI_API_KEY = 'fake-gemini-key';
+// A real provider key is never used (the model is scripted below), but the
+// config layer validates that exactly one provider is configured. Pin the
+// choice so a developer's .env cannot change what this test exercises.
+process.env.AI_PROVIDER = 'deepseek';
+process.env.DEEPSEEK_API_KEY = 'fake-deepseek-key';
+delete process.env.GEMINI_API_KEY;
 process.env.ADMIN_USER_ID = '4242';
 process.env.TIMEZONE = 'Asia/Singapore';
 delete process.env.WEBHOOK_DOMAIN;
@@ -136,14 +143,9 @@ function allMessages(): string {
 /** Replaces the model with one that always asks for the given tool call. */
 function scriptToolCall(name: string, args: Record<string, unknown>): void {
   (assistant as unknown as AssistantInternals).client = {
+    name: 'scripted-tool',
     async generate() {
-      return {
-        text: '',
-        raw: {
-          role: 'model',
-          parts: [{ functionCall: { id: `call-${name}`, name, args } }],
-        },
-      };
+      return { text: '', toolCalls: [{ id: `call-${name}`, name, args }] };
     },
     async generateText() {
       return '';
@@ -153,8 +155,9 @@ function scriptToolCall(name: string, args: Record<string, unknown>): void {
 
 function scriptText(text: string): void {
   (assistant as unknown as AssistantInternals).client = {
+    name: 'scripted-text',
     async generate() {
-      return { text, raw: { role: 'model', parts: [{ text }] } };
+      return { text, toolCalls: [] };
     },
     async generateText() {
       return '';
@@ -298,4 +301,36 @@ test('/forget clears conversation memory only', async () => {
   assert.match(lastMessage(), /memory cleared/i);
   assert.equal(await store.countMessages(4242), 0);
   assert.equal((await store.getFact(4242, 'home_city'))?.value, 'Singapore');
+});
+
+test('polling mode starts the reminder scheduler even though launch() never resolves', async () => {
+  // Regression test: Telegraf's launch() returns the long-poll loop promise, so
+  // it does not settle while polling. Awaiting it blocked everything after it,
+  // which meant reminders were never delivered in polling mode.
+  const pollingBot = new Bot();
+  const internals = pollingBot as unknown as {
+    httpServer: unknown;
+    scheduler: { start(): void; stop(): void; isRunning(): boolean };
+  };
+
+  // A real health server is bound on PORT (3399, set above) and closed again by
+  // stop(). Only Telegram is stubbed, via launch().
+  (pollingBot.getBot() as unknown as { launch(): Promise<void> }).launch = () =>
+    new Promise<void>(() => {});
+
+  const started: string[] = [];
+  const realStart = internals.scheduler.start.bind(internals.scheduler);
+  internals.scheduler.start = () => {
+    started.push('scheduler');
+    realStart();
+  };
+
+  // If start() awaited launch(), this would hang and the test would time out.
+  await pollingBot.start();
+
+  assert.deepEqual(started, ['scheduler'], 'the scheduler must be started');
+  assert.equal(internals.scheduler.isRunning(), true);
+
+  pollingBot.dispose();
+  await pollingBot.stop('test');
 });

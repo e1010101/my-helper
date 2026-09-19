@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A powerful, extensible Telegram bot built with TypeScript, designed for personal use. The bot uses the Telegraf framework for Telegram integration, Supabase for PostgreSQL storage, and Google Gemini for conversational replies.
+A powerful, extensible Telegram bot built with TypeScript, designed for personal use. The bot uses the Telegraf framework for Telegram integration, Supabase for PostgreSQL storage, and a configurable LLM provider for conversational replies.
 
 **Tech Stack:**
 - **Runtime:** Node.js (v18+) with TypeScript (ESM — imports use `.js` extensions)
 - **Bot Framework:** Telegraf v4
 - **Database:** Supabase (PostgreSQL)
-- **AI:** Google Gemini (`gemini-2.5-flash`) via `@google/genai`
+- **AI:** DeepSeek (`deepseek-chat`) by default; Google Gemini also supported
 - **Hosting:** Railway.app (recommended) or any Node.js hosting platform
 - **Development:** tsx for fast TypeScript execution with watch mode
 
@@ -22,7 +22,10 @@ A powerful, extensible Telegram bot built with TypeScript, designed for personal
    - `SUPABASE_URL`, `SUPABASE_ANON_KEY`: From your Supabase project settings
    - `SUPABASE_SERVICE_ROLE_KEY`: **Required** for assistant memory, facts, reminders
      and confirmations — those tables have RLS enabled and only answer this key
-   - `GEMINI_API_KEY`: From Google AI Studio
+   - `DEEPSEEK_API_KEY`: From platform.deepseek.com. `AI_PROVIDER` picks between
+     providers; with only one key set it is inferred, and having both keys set
+     without `AI_PROVIDER` is a startup error rather than a silent coin flip
+   - `GEMINI_API_KEY`: Optional alternative provider (`AI_PROVIDER=gemini`)
    - `ADMIN_USER_ID`: Your Telegram user ID (comma-separated list is supported; unset
      means no admins, and reminders have no delivery destination)
    - `TIMEZONE`: IANA name (e.g. `Asia/Singapore`) used for reminders and
@@ -54,7 +57,10 @@ src/
 │   ├── supabase-assistant-store.ts  # Postgres memory/facts/reminders/confirmations
 │   ├── in-memory-assistant-store.ts # In-memory store for tests and fallbacks
 │   ├── assistant.ts        # Conversation loop, tool dispatch, confirmations
-│   ├── gemini-client.ts    # AIClient interface + Gemini implementation
+│   ├── ai-client.ts        # Provider-neutral AIClient/AgentMessage contract
+│   ├── ai-provider.ts      # Picks the provider from configuration
+│   ├── deepseek-provider.ts # DeepSeek (OpenAI-compatible) implementation
+│   ├── gemini-provider.ts  # Gemini implementation
 │   ├── reminder-time.ts    # Timezone maths, recurrence, NL time parsing
 │   ├── reminder-scheduler.ts # Polls due reminders and delivers them
 │   ├── health.ts           # Health snapshot for /health and /status
@@ -81,7 +87,7 @@ src/
 - Sets up the Telegraf bot instance with `webhookReply: false`
 - Configures middleware for logging and command tracking
 - Wires the assistant: `SupabaseAssistantStore` → `AssistantService` (with the default
-  tool registry and `GeminiClient`) → `ReminderScheduler`
+  tool registry and the configured `AIClient`) → `ReminderScheduler`
 - Routes non-command text to the assistant (skipped while a `/prompt` draft is active)
 - Serves `/health` (and `/`) plus `/webhook` from one HTTP server in both modes
 - Binds explicitly to `0.0.0.0` and prefers the platform-injected `PORT`
@@ -128,6 +134,12 @@ database-dependent goes through an interface (`AssistantStore`, `AIClient`,
 credentials or network. Keep it that way when adding features: if a new capability is
 hard to test, that is a sign it should take its dependency as a parameter.
 
+The model provider is behind `AIClient` ([src/services/ai-client.ts](src/services/ai-client.ts)),
+which speaks a neutral `AgentMessage` conversation; each provider translates to and from
+its own wire format. `DeepSeekProvider.toChatMessages` is exported specifically so the
+translation can be asserted without a network call, and `DeepSeekProvider` accepts a
+`fetchImpl` for the same reason.
+
 ### Message Formatting
 
 Telegram rejects a whole message with a 400 "can't parse entities" error if
@@ -136,7 +148,7 @@ user-supplied text contains parse-mode characters. Two rules follow:
 1. **Never interpolate raw user text** into a message sent with a `parse_mode`.
    Wrap it in `escapeHtml()` from [src/utils/telegram-format.ts](src/utils/telegram-format.ts)
    and send with `parse_mode: 'HTML'`.
-2. Gemini returns standard Markdown, which is **not** Telegram's dialect
+2. Models return standard Markdown, which is **not** Telegram's dialect
    (`**bold**`, headings and fenced code blocks do not render). Pass AI output
    through `markdownToTelegramHtml()` before replying.
 
@@ -178,7 +190,7 @@ re-runnable.
 
 **Railway.app (Recommended):**
 1. Connect the GitHub repository to Railway
-2. Add environment variables in the Railway dashboard (including `GEMINI_API_KEY`)
+2. Add environment variables in the Railway dashboard (including `DEEPSEEK_API_KEY`)
 3. Railway auto-detects Node.js and runs `npm start`
 4. For webhook mode: set `WEBHOOK_DOMAIN` to your Railway domain and `WEBHOOK_SECRET`
    to a random `A-Za-z0-9_-` string

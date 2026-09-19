@@ -7,10 +7,10 @@ import { HealthService } from './services/health.js';
 import { logger } from './services/logger.js';
 import { markdownToTelegramHtml, escapeHtml } from './utils/telegram-format.js';
 import { SupabaseAssistantStore } from './services/supabase-assistant-store.js';
-import { GeminiClient } from './services/gemini-client.js';
 import { AssistantService } from './services/assistant.js';
 import { ReminderScheduler } from './services/reminder-scheduler.js';
 import { createDefaultToolRegistry } from './tools/builtin-tools.js';
+import { createAIClient } from './services/ai-provider.js';
 import { formatLocal } from './services/reminder-time.js';
 import { registerAssistantCommands } from './commands/assistant-commands.js';
 
@@ -37,6 +37,7 @@ export class Bot {
   private httpServer?: ReturnType<typeof createServer>;
   private assistant: AssistantService;
   private scheduler: ReminderScheduler;
+  private shutdownHandler?: (signal: NodeJS.Signals) => void;
 
   constructor() {
     this.bot = new Telegraf(env.telegram().token, {
@@ -54,7 +55,7 @@ export class Bot {
     this.assistant = new AssistantService({
       store,
       registry: createDefaultToolRegistry(),
-      client: new GeminiClient(),
+      client: createAIClient(),
       timezone: env.timezone(),
     });
 
@@ -224,8 +225,23 @@ export class Bot {
       });
     });
 
-    process.once('SIGINT', () => this.stop('SIGINT'));
-    process.once('SIGTERM', () => this.stop('SIGTERM'));
+    // Kept on the instance so a shutdown can remove them (and so tests do not
+    // leave handlers behind that fire during process teardown).
+    this.shutdownHandler = (signal: NodeJS.Signals) => {
+      void this.stop(signal);
+    };
+
+    process.once('SIGINT', this.shutdownHandler);
+    process.once('SIGTERM', this.shutdownHandler);
+  }
+
+  /** Detaches the process signal handlers registered by setupErrorHandling. */
+  dispose(): void {
+    if (this.shutdownHandler) {
+      process.removeListener('SIGINT', this.shutdownHandler);
+      process.removeListener('SIGTERM', this.shutdownHandler);
+      this.shutdownHandler = undefined;
+    }
   }
 
   /**
@@ -338,7 +354,16 @@ export class Bot {
       await this.listen(this.httpServer, port, 'Health endpoint');
 
       logger.info('Starting bot in polling mode...');
-      await this.bot.launch();
+
+      // launch() resolves only when polling *stops*: it returns the long-poll
+      // loop promise. Awaiting it here would block everything after it, which
+      // previously meant the scheduler never started in polling mode and
+      // reminders were never delivered. Start it in the background and treat
+      // rejection as fatal instead.
+      void this.bot.launch().catch((error) => {
+        logger.error('Bot polling failed; exiting', error);
+        process.exit(1);
+      });
 
       this.startScheduler();
 
@@ -413,7 +438,13 @@ export class Bot {
       });
     }
 
-    this.bot.stop(signal);
+    // Telegraf throws "Bot is not running!" when stop() is called before a
+    // successful launch; a failed startup must still be able to shut down.
+    try {
+      this.bot.stop(signal);
+    } catch (error) {
+      logger.warn('Bot was not running at shutdown', { reason: String(error) });
+    }
     logger.info('Bot stopped');
   }
 

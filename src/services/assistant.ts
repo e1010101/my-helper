@@ -1,7 +1,6 @@
-import { createPartFromFunctionResponse, createPartFromText, createUserContent, type Content, type Part } from '@google/genai';
 import { logger } from './logger.js';
 import type { AssistantStore } from './assistant-store.js';
-import type { AIClient } from './gemini-client.js';
+import type { AIClient, AgentMessage } from './ai-client.js';
 import type { ToolContext, ToolRegistry, ValidatedCall } from '../tools/registry.js';
 
 export interface PendingConfirmation {
@@ -31,7 +30,7 @@ const DEFAULT_HISTORY_LIMIT = 40;
 const DEFAULT_MAX_ITERATIONS = 4;
 const DEFAULT_CONFIRMATION_TTL_MS = 10 * 60 * 1000;
 
-/** Models the reply these tools produce; kept for graceful degradation. */
+/** Used when the model fails; kept here so the bot layer stays provider-agnostic. */
 const DEGRADED_REPLY = '🤖 Sorry, I am having trouble reaching my brain right now. Please try again.';
 
 export class AssistantService {
@@ -70,15 +69,17 @@ export class AssistantService {
       logger.error('Failed to persist user message; continuing without memory', error);
     }
 
-    const contents: Content[] = [
-      ...history.map((message) => ({
-        role: message.role,
-        parts: [createPartFromText(message.content)],
+    const messages: AgentMessage[] = [
+      // Persisted history uses 'model' (the database enum); the neutral
+      // contract calls that role 'assistant'.
+      ...history.map((message): AgentMessage => ({
+        role: message.role === 'model' ? 'assistant' : 'user',
+        content: message.content,
       })),
-      createUserContent(text),
+      { role: 'user', content: text },
     ];
 
-    return await this.runLoop(userId, contents, now);
+    return await this.runLoop(userId, messages, now);
   }
 
   /** Executes a confirmed write tool and lets the model narrate the outcome. */
@@ -120,14 +121,18 @@ export class AssistantService {
 
     await this.store.deletePendingAction(actionId);
 
-    // Replay the original function-call turn plus its result so the model can
+    // Replay the original assistant turn plus the tool result so the model can
     // explain what happened in context.
-    const contents: Content[] = [
-      ...(action.modelParts as Content[]),
-      createUserContent([createFunctionResponsePart({ name: action.toolName }, { result })]),
+    const messages: AgentMessage[] = [
+      ...(action.modelParts as AgentMessage[]),
+      {
+        role: 'tool',
+        toolCallId: this.toolCallIdFor(action.modelParts as AgentMessage[], action.toolName),
+        content: result,
+      },
     ];
 
-    return await this.runLoop(userId, contents, this.now());
+    return await this.runLoop(userId, messages, this.now());
   }
 
   async rejectPendingAction(userId: number, actionId: number): Promise<ConversationReply> {
@@ -170,33 +175,40 @@ export class AssistantService {
     }
   }
 
-  private async runLoop(userId: number, contents: Content[], now: Date): Promise<ConversationReply> {
-    const tools = this.registry.list().length > 0
-      ? [{ functionDeclarations: this.registry.toFunctionDeclarations() }]
-      : undefined;
+  /** Finds the id of the write call that was paused for confirmation. */
+  private toolCallIdFor(messages: AgentMessage[], toolName: string): string {
+    for (const message of messages) {
+      if (message.role === 'assistant' && message.toolCalls) {
+        const match = message.toolCalls.find((call) => call.name === toolName);
+        if (match) {
+          return match.id;
+        }
+      }
+    }
+    return toolName;
+  }
 
+  private async runLoop(userId: number, messages: AgentMessage[], now: Date): Promise<ConversationReply> {
     const context: ToolContext = { userId, store: this.store, timezone: this.timezone, now };
 
     for (let iteration = 0; iteration < this.maxToolIterations; iteration++) {
-      const turn = await this.client.generate(contents, tools);
-      const functionCalls = collectFunctionCalls(turn.raw);
+      const turn = await this.client.generate(messages, this.registry);
 
-      if (functionCalls.length === 0) {
+      if (turn.toolCalls.length === 0) {
         const text = turn.text.trim() || DEGRADED_REPLY;
         await this.remember(userId, text);
         return { kind: 'message', text };
       }
 
-      contents.push(turn.raw);
+      messages.push({ role: 'assistant', content: turn.text, toolCalls: turn.toolCalls });
 
-      const results: Part[] = [];
       const writeCalls: ValidatedCall[] = [];
 
-      for (const call of functionCalls) {
+      for (const call of turn.toolCalls) {
         const resolved = this.registry.resolve(call.name, call.args);
 
         if (!resolved.call) {
-          results.push(createFunctionResponsePart(call, { error: resolved.error }));
+          messages.push({ role: 'tool', toolCallId: call.id, content: resolved.error ?? 'Unknown tool', isError: true });
           continue;
         }
 
@@ -207,14 +219,15 @@ export class AssistantService {
 
         try {
           const result = await this.registry.execute(resolved.call, context);
-          results.push(createFunctionResponsePart(call, { result }));
+          messages.push({ role: 'tool', toolCallId: call.id, content: result });
         } catch (error) {
           logger.error(`Tool ${call.name} failed`, error);
-          results.push(
-            createFunctionResponsePart(call, {
-              error: 'The tool failed. Tell the user it did not work.',
-            })
-          );
+          messages.push({
+            role: 'tool',
+            toolCallId: call.id,
+            content: 'The tool failed. Tell the user it did not work.',
+            isError: true,
+          });
         }
       }
 
@@ -226,7 +239,9 @@ export class AssistantService {
           userId,
           toolName: primary.tool.name,
           args: primary.args,
-          modelParts: [turn.raw],
+          // The assistant turn that requested the call, so the loop can resume
+          // in context after the user confirms.
+          modelParts: [messages[messages.length - 1]],
           expiresAt,
         });
 
@@ -245,14 +260,6 @@ export class AssistantService {
           },
         };
       }
-
-      if (results.length === 0) {
-        const text = turn.text.trim() || DEGRADED_REPLY;
-        await this.remember(userId, text);
-        return { kind: 'message', text };
-      }
-
-      contents.push(createUserContent(results));
     }
 
     logger.warn('Tool loop hit its iteration cap', { userId });
@@ -269,30 +276,6 @@ export class AssistantService {
       logger.error('Failed to persist assistant message', error);
     }
   }
-}
-
-interface RawFunctionCall {
-  id?: string;
-  name: string;
-  args?: Record<string, unknown>;
-}
-
-function collectFunctionCalls(content: Content): RawFunctionCall[] {
-  const parts = content.parts ?? [];
-  return parts
-    .map((part) => (part as { functionCall?: RawFunctionCall }).functionCall)
-    .filter((call): call is RawFunctionCall => Boolean(call?.name));
-}
-
-/**
- * Gemini requires every function call to be answered by a matching response,
- * keyed by the call id, otherwise the next request is rejected.
- */
-function createFunctionResponsePart(
-  call: RawFunctionCall,
-  payload: Record<string, unknown>
-): Part {
-  return createPartFromFunctionResponse(call.id ?? call.name, call.name, payload);
 }
 
 function summarise(call: ValidatedCall): string {

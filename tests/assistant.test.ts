@@ -1,9 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { Content, Tool } from '@google/genai';
 
 import { AssistantService } from '../src/services/assistant.js';
-import type { AIClient, ModelTurn } from '../src/services/gemini-client.js';
+import type { AIClient, AgentMessage, ModelTurn } from '../src/services/ai-client.js';
 import { InMemoryAssistantStore } from '../src/services/in-memory-assistant-store.js';
 import { createDefaultToolRegistry } from '../src/tools/builtin-tools.js';
 import { localKey } from '../src/services/reminder-time.js';
@@ -16,29 +15,23 @@ const NOW = new Date('2026-03-10T01:00:00Z'); // 09:00 in Singapore
 function callTurn(...calls: { id: string; name: string; args?: Record<string, unknown> }[]): ModelTurn {
   return {
     text: '',
-    raw: {
-      role: 'model',
-      parts: calls.map((call) => ({
-        functionCall: { id: call.id, name: call.name, args: call.args ?? {} },
-      })),
-    },
+    toolCalls: calls.map((call) => ({ id: call.id, name: call.name, args: call.args ?? {} })),
   };
 }
 
 function textTurn(text: string): ModelTurn {
-  return { text, raw: { role: 'model', parts: [{ text }] } };
+  return { text, toolCalls: [] };
 }
 
 /** Scripted AI client that records what it was asked. */
 class FakeClient implements AIClient {
-  readonly calls: Content[][] = [];
-  readonly toolsSeen: (Tool[] | undefined)[] = [];
+  readonly name = 'fake';
+  readonly calls: AgentMessage[][] = [];
 
   constructor(private readonly script: ModelTurn[]) {}
 
-  async generate(contents: Content[], tools?: Tool[]): Promise<ModelTurn> {
-    this.calls.push(structuredClone(contents));
-    this.toolsSeen.push(tools);
+  async generate(messages: AgentMessage[]): Promise<ModelTurn> {
+    this.calls.push(structuredClone(messages));
     const next = this.script.shift();
     if (!next) {
       throw new Error('FakeClient ran out of scripted turns');
@@ -64,13 +57,11 @@ function makeService(script: ModelTurn[], registry: ToolRegistry = createDefault
   return { store, client, service };
 }
 
-/** Extracts the function-response payloads from a recorded request. */
-function functionResponses(contents: Content[]): Record<string, unknown>[] {
-  return contents
-    .flatMap((content) => content.parts ?? [])
-    .map((part) => (part as { functionResponse?: { response?: Record<string, unknown> } }).functionResponse)
-    .filter((response): response is { response: Record<string, unknown> } => Boolean(response?.response))
-    .map((response) => response.response);
+/** Tool results the loop fed back to the model. */
+function toolResults(messages: AgentMessage[]): { toolCallId: string; content: string; isError?: boolean }[] {
+  return messages.filter(
+    (message): message is Extract<AgentMessage, { role: 'tool' }> => message.role === 'tool'
+  );
 }
 
 test('a plain reply is returned and both turns are persisted', async () => {
@@ -102,9 +93,9 @@ test('read tools run inline and their output is fed back to the model', async ()
   assert.equal(reply.kind === 'message' && reply.text, 'It is nine in the morning.');
   assert.equal(client.calls.length, 2, 'the loop ran a second model pass');
 
-  const [payload] = functionResponses(client.calls[1]);
-  assert.ok(payload, 'a function response was sent back');
-  assert.match(String(payload.result), /2026/);
+  const [payload] = toolResults(client.calls[1]);
+  assert.ok(payload, 'a tool result was sent back');
+  assert.match(payload.content, /2026/);
 });
 
 test('a write tool does not execute until it is confirmed', async () => {
@@ -242,8 +233,8 @@ test('an unparseable time is reported to the model without scheduling', async ()
   await service.approvePendingAction(1, first.confirmation.id);
 
   assert.equal((await store.listReminders(1)).length, 0);
-  const payloads = functionResponses(client.calls[1]);
-  assert.match(String(payloads[0].result), /could not understand/i);
+  const payloads = toolResults(client.calls[1]);
+  assert.match(payloads[0].content, /could not understand/i);
 });
 
 test('an invalid write-tool call is reported back instead of throwing', async () => {
@@ -256,8 +247,9 @@ test('an invalid write-tool call is reported back instead of throwing', async ()
 
   assert.equal(reply.kind === 'message' && reply.text, 'I need the value too.');
   assert.equal(await store.getFact(1, 'k'), null, 'nothing was written');
-  const payloads = functionResponses(client.calls[1]);
-  assert.match(String(payloads[0].error), /Missing required parameter "value"/);
+  const payloads = toolResults(client.calls[1]);
+  assert.equal(payloads[0].isError, true);
+  assert.match(payloads[0].content, /Missing required parameter "value"/);
 });
 
 test('an unknown tool is surfaced to the model as an error', async () => {
@@ -268,8 +260,8 @@ test('an unknown tool is surfaced to the model as an error', async () => {
 
   await service.processMessage(1, 'delete everything');
 
-  const payloads = functionResponses(client.calls[1]);
-  assert.match(String(payloads[0].error), /Unknown tool/);
+  const payloads = toolResults(client.calls[1]);
+  assert.match(payloads[0].content, /Unknown tool/);
 });
 
 test('a tool that throws is reported without breaking the reply', async () => {
@@ -288,14 +280,15 @@ test('a tool that throws is reported without breaking the reply', async () => {
   const reply = await service.processMessage(1, 'what time is it?');
 
   assert.equal(reply.kind === 'message' && reply.text, 'That failed.');
-  const payloads = functionResponses(client.calls[1]);
-  assert.match(String(payloads[0].error), /failed/i);
+  const payloads = toolResults(client.calls[1]);
+  assert.match(payloads[0].content, /failed/i);
 });
 
 test('the tool loop stops instead of spinning forever', async () => {
   // Always asks for a tool, never answers.
   const store = new InMemoryAssistantStore();
   const client: AIClient = {
+    name: 'looping-fake',
     async generate() {
       return callTurn({ id: 'c', name: 'current_time' });
     },
