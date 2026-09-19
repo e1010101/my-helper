@@ -43,6 +43,7 @@ A powerful, extensible Telegram bot built with TypeScript, designed for personal
 - `npm test` - Run the `node:test` suites under `tests/`
 - `npm run db:migrate` - Apply `docs/database-schema.sql` via `psql` (needs `DATABASE_URL`)
 - `npm run preflight` - Verify variables, Telegram, Supabase (incl. RLS) and the model
+- `npm run verify:deploy <url>` - Check a live deployment's endpoints and webhook wiring
 - `npm run webhook:info|delete|set` - Inspect or change the Telegram webhook
 
 ## Architecture

@@ -15,7 +15,8 @@
     "webhook:delete": "tsx scripts/webhook-manager.ts delete",
     "webhook:set": "tsx scripts/webhook-manager.ts set",
     "db:migrate": "tsx scripts/db-migrate.ts",
-    "preflight": "tsx scripts/preflight.ts"
+    "preflight": "tsx scripts/preflight.ts",
+    "verify:deploy": "tsx scripts/verify-deploy.ts"
   },
   "keywords": [
     "telegram",

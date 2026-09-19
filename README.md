@@ -366,6 +366,16 @@ exist, that the service-role key can actually write to the RLS-protected tables,
 anon key is correctly refused, that the configured model answers, and that reminders have
 a delivery destination. Read-only against your data.
 
+After deploying, check the live instance the same way:
+
+```bash
+npm run verify:deploy https://your-app.up.railway.app
+```
+
+It confirms both health endpoints answer correctly, that Telegram is pointed at *this*
+deployment with the secret configured, and that webhook delivery has no errors. Reminder
+delivery itself cannot be checked through the Bot API, so that stays a manual step.
+
 **Row Level Security:** `conversations`, `facts`, `reminders`, `pending_actions` and
 `credentials` have RLS enabled with only a `service_role` policy, so they are unreadable
 with the public key. Set `SUPABASE_SERVICE_ROLE_KEY` or the assistant features will fail —
