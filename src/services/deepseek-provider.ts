@@ -170,11 +170,11 @@ export class DeepSeekProvider implements AIClient {
     return { text: message.content ?? '', toolCalls };
   }
 
-  async generateText(prompt: string): Promise<string> {
+  async generateText(prompt: string, systemInstruction?: string): Promise<string> {
     const response = await this.post('/chat/completions', {
       model: this.model,
       messages: [
-        { role: 'system', content: this.systemInstruction },
+        { role: 'system', content: systemInstruction ?? this.systemInstruction },
         { role: 'user', content: prompt },
       ],
     });

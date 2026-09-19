@@ -354,6 +354,17 @@ npm run db:migrate
 The script applies the schema, then prints per-table status including which tables have
 Row Level Security enabled, so you can confirm the migration took effect.
 
+Before deploying — or whenever something looks wrong — run the preflight check:
+
+```bash
+npm run preflight
+```
+
+It verifies every required variable, that the Telegram token works, that all nine tables
+exist, that the service-role key can actually write to the RLS-protected tables, that the
+anon key is correctly refused, that the configured model answers, and that reminders have
+a delivery destination. Read-only against your data.
+
 **Row Level Security:** `conversations`, `facts`, `reminders`, `pending_actions` and
 `credentials` have RLS enabled with only a `service_role` policy, so they are unreadable
 with the public key. Set `SUPABASE_SERVICE_ROLE_KEY` or the assistant features will fail —

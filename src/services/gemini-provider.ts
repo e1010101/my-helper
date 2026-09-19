@@ -111,11 +111,13 @@ export class GeminiProvider implements AIClient {
     return { text: response.text ?? '', toolCalls };
   }
 
-  async generateText(prompt: string): Promise<string> {
+  async generateText(prompt: string, systemInstruction?: string): Promise<string> {
+    // Accepting the instruction keeps the AIClient contract uniform: a caller
+    // must not have to know which provider it holds.
     const response = await this.ai.models.generateContent({
       model: this.model,
       contents: prompt,
-      config: { systemInstruction: this.systemInstruction },
+      config: { systemInstruction: systemInstruction ?? this.systemInstruction ?? env.systemInstruction() },
     });
     return response.text ?? '';
   }

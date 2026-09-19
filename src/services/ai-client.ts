@@ -39,7 +39,7 @@ export interface AIClient {
     systemInstruction?: string
   ): Promise<ModelTurn>;
   /** Plain one-shot completion with no history or tools. */
-  generateText(prompt: string): Promise<string>;
+  generateText(prompt: string, systemInstruction?: string): Promise<string>;
 }
 
 /**
