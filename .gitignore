@@ -8,6 +8,8 @@ dist/
 .env
 .env.local
 .env.*.local
+# Hosting provider variable sets, generated from .env — contain real secrets
+.env.railway
 
 # IDE
 .vscode/
