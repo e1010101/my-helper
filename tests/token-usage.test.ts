@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { breakdownRequest, estimateTokens } from '../src/services/token-usage.js';
+import { breakdownRequest, buildFactsBlock, commonPrefix, estimateTokens, MAX_CORE_FACTS, MAX_FACT_VALUE_CHARS } from '../src/services/token-usage.js';
 import { DeepSeekProvider } from '../src/services/deepseek-provider.js';
 
 const composition = { systemChars: 400, toolsChars: 2000, messagesChars: 600 };
@@ -133,4 +133,84 @@ test('a malformed usage block is ignored rather than producing NaN', async () =>
 
   const turn = await provider.generate([{ role: 'user', content: 'x' }]);
   assert.equal(turn.usage, undefined);
+});
+
+// --- Fact block ------------------------------------------------------------
+
+test('no facts produces no block at all', () => {
+  const block = buildFactsBlock([]);
+
+  assert.equal(block.text, '');
+  assert.equal(block.included, 0);
+});
+
+test('facts are rendered as key: value lines', () => {
+  const block = buildFactsBlock([
+    { key: 'diet', value: 'vegetarian' },
+    { key: 'home_city', value: 'Singapore' },
+  ]);
+
+  assert.match(block.text, /diet: vegetarian/);
+  assert.match(block.text, /home_city: Singapore/);
+  assert.equal(block.included, 2);
+});
+
+test('a shared key prefix is stated once rather than repeated', () => {
+  // Ten "preference_*" keys would otherwise spend most of the block repeating
+  // the word "preference".
+  const facts = Array.from({ length: 5 }, (_, i) => ({ key: `preference_${i}`, value: `v${i}` }));
+  const block = buildFactsBlock(facts);
+
+  assert.equal(commonPrefix(facts.map((f) => f.key)), 'preference_');
+  assert.match(block.text, /prefixed "preference_"/);
+  assert.match(block.text, /0: v0/);
+  assert.ok(
+    block.text.split('preference_').length - 1 <= 1,
+    'the prefix should appear only in the explanation, not on every line'
+  );
+});
+
+test('the number of injected facts is capped', () => {
+  const facts = Array.from({ length: MAX_CORE_FACTS + 7 }, (_, i) => ({ key: `k${i}`, value: `v${i}` }));
+  const block = buildFactsBlock(facts);
+
+  assert.equal(block.included, MAX_CORE_FACTS);
+  assert.equal(block.omitted, 7);
+  // Withheld facts are disclosed, not silently dropped: an assistant that
+  // believes it has the whole picture is worse than one that knows it does not.
+  assert.match(block.text, /7 more stored facts not shown/);
+  assert.match(block.text, /list_facts/);
+});
+
+test('an over-long value is truncated and counted', () => {
+  const block = buildFactsBlock([{ key: 'essay', value: 'x'.repeat(500) }]);
+
+  assert.equal(block.truncated, 1);
+  assert.ok(block.text.length < 500, 'the value was actually shortened');
+  assert.ok(block.text.includes('…'));
+});
+
+test('a single runaway value cannot crowd out other facts', () => {
+  const block = buildFactsBlock([
+    { key: 'essay', value: 'x'.repeat(10_000) },
+    { key: 'diet', value: 'vegetarian' },
+  ]);
+
+  assert.match(block.text, /diet: vegetarian/, 'the short fact still survives');
+  assert.ok(
+    block.text.length < MAX_FACT_VALUE_CHARS * 3,
+    'total size stays bounded by the per-value cap'
+  );
+});
+
+test('the block size stays within a predictable bound', () => {
+  const facts = Array.from({ length: MAX_CORE_FACTS }, (_, i) => ({
+    key: `fact_number_${i}`,
+    value: 'y'.repeat(MAX_FACT_VALUE_CHARS + 50),
+  }));
+
+  const block = buildFactsBlock(facts);
+  // Worst case is what makes injection affordable: ~20 x 200 chars is about
+  // 1,100 tokens, and it cannot grow beyond that no matter how much is stored.
+  assert.ok(block.text.length < 6_000, `block was ${block.text.length} chars`);
 });

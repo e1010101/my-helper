@@ -24,27 +24,38 @@ const currentTime: ToolDefinition = {
 const saveFact: ToolDefinition = {
   name: 'save_fact',
   description:
-    "Remember a durable fact or preference about the user, e.g. their home city, dietary needs, or dislikes. Use short lowercase keys like 'home_city' or 'diet'.",
+    "Remember a durable fact or preference about the user. Use short lowercase keys like 'home_city' or 'diet'. " +
+    "Set tier to 'core' only for things that should shape your behaviour unprompted (diet, allergies, home city, " +
+    "dislikes): core facts are always in your context, so keep them few. Everything else — passwords, codes, " +
+    'details you would only look up on request — stays \'reference\' and costs no context.',
   kind: 'write',
   parameters: {
     type: 'object',
     properties: {
       key: { type: 'string', description: "Short identifier, e.g. 'home_city'" },
       value: { type: 'string', description: 'The value to remember, e.g. "Singapore"' },
+      tier: {
+        type: 'string',
+        description: "'core' (always in context) or 'reference' (looked up on demand). Defaults to reference.",
+        enum: ['core', 'reference'],
+      },
     },
     required: ['key', 'value'],
   },
   async execute(args, context) {
     const key = String(args.key);
     const value = String(args.value);
-    await context.store.saveFact(context.userId, key, value);
-    return `Saved fact "${key}" = "${value}".`;
+    const tier = args.tier === 'core' ? 'core' : 'reference';
+    await context.store.saveFact(context.userId, key, value, tier);
+    const note = tier === 'core' ? ' It is now always in my context.' : '';
+    return `Saved fact "${key}" = "${value}" (${tier}).${note}`;
   },
 };
 
 const listFacts: ToolDefinition = {
   name: 'list_facts',
-  description: 'List everything currently remembered about the user.',
+  description:
+    'List everything currently remembered about the user, including the core facts already in your context.',
   kind: 'read',
   parameters: { type: 'object', properties: {} },
   async execute(_args, context) {
@@ -52,7 +63,9 @@ const listFacts: ToolDefinition = {
     if (facts.length === 0) {
       return 'No facts stored yet.';
     }
-    return facts.map((fact) => `${fact.key}: ${fact.value}`).join('\n');
+    return facts
+      .map((fact) => `${fact.key}${fact.tier === 'core' ? ' [core]' : ''}: ${fact.value}`)
+      .join('\n');
   },
 };
 

@@ -4,6 +4,7 @@ import type { AssistantStore } from './assistant-store.js';
 import type {
   ConversationMessage,
   Fact,
+  FactTier,
   NewConversationMessage,
   NewReminder,
   PendingActionRecord,
@@ -22,6 +23,7 @@ interface MessageRow {
 interface FactRow {
   key: string;
   value: string;
+  tier?: string | null;
   updated_at: string;
 }
 
@@ -60,7 +62,14 @@ function toMessage(row: MessageRow): ConversationMessage {
 }
 
 function toFact(row: FactRow): Fact {
-  return { key: row.key, value: row.value, updatedAt: row.updated_at };
+  // Anything that is not explicitly 'core' is treated as reference, so a
+  // database predating the tier column behaves like the safest default.
+  return {
+    key: row.key,
+    value: row.value,
+    updatedAt: row.updated_at,
+    tier: row.tier === 'core' ? 'core' : 'reference',
+  };
 }
 
 function toReminder(row: ReminderRow): Reminder {
@@ -145,12 +154,13 @@ export class SupabaseAssistantStore implements AssistantStore {
     }
   }
 
-  async saveFact(userId: number, key: string, value: string): Promise<void> {
+  async saveFact(userId: number, key: string, value: string, tier: FactTier = 'reference'): Promise<void> {
     const { error } = await this.client.from('facts').upsert(
       {
         user_id: userId,
         key: key.toLowerCase(),
         value,
+        tier,
         updated_at: new Date().toISOString(),
       },
       { onConflict: 'user_id,key' }
@@ -164,7 +174,7 @@ export class SupabaseAssistantStore implements AssistantStore {
   async getFact(userId: number, key: string): Promise<Fact | null> {
     const { data, error } = await this.client
       .from('facts')
-      .select('key, value, updated_at')
+      .select('key, value, tier, updated_at')
       .eq('user_id', userId)
       .eq('key', key.toLowerCase())
       .maybeSingle();
@@ -179,13 +189,34 @@ export class SupabaseAssistantStore implements AssistantStore {
   async listFacts(userId: number, limit = 50): Promise<Fact[]> {
     const { data, error } = await this.client
       .from('facts')
-      .select('key, value, updated_at')
+      .select('key, value, tier, updated_at')
       .eq('user_id', userId)
       .order('key', { ascending: true })
       .limit(limit);
 
     if (error) {
       throw new Error(`Failed to list facts: ${error.message}`);
+    }
+
+    return (data as FactRow[]).map(toFact);
+  }
+
+  /**
+   * Core facts only, which are the ones injected into every prompt. Kept
+   * separate from listFacts so the prompt path cannot accidentally pull in
+   * reference material and inflate every request.
+   */
+  async listCoreFacts(userId: number, limit = 20): Promise<Fact[]> {
+    const { data, error } = await this.client
+      .from('facts')
+      .select('key, value, tier, updated_at')
+      .eq('user_id', userId)
+      .eq('tier', 'core')
+      .order('key', { ascending: true })
+      .limit(limit);
+
+    if (error) {
+      throw new Error(`Failed to list core facts: ${error.message}`);
     }
 
     return (data as FactRow[]).map(toFact);

@@ -1,6 +1,7 @@
 import type {
   ConversationMessage,
   Fact,
+  FactTier,
   NewConversationMessage,
   NewReminder,
   PendingActionRecord,
@@ -50,10 +51,11 @@ export class InMemoryAssistantStore implements AssistantStore {
     this.messages = this.messages.filter((message) => message.userId !== userId);
   }
 
-  async saveFact(userId: number, key: string, value: string): Promise<void> {
+  async saveFact(userId: number, key: string, value: string, tier: FactTier = 'reference'): Promise<void> {
     this.facts.set(this.factKey(userId, key), {
       key,
       value,
+      tier,
       updatedAt: new Date().toISOString(),
     });
   }
@@ -67,6 +69,16 @@ export class InMemoryAssistantStore implements AssistantStore {
     return [...this.facts.entries()]
       .filter(([storedKey]) => storedKey.startsWith(prefix))
       .map(([, fact]) => fact)
+      .sort((a, b) => a.key.localeCompare(b.key))
+      .slice(0, limit);
+  }
+
+  async listCoreFacts(userId: number, limit = 20): Promise<Fact[]> {
+    const prefix = `${userId}:`;
+    return [...this.facts.entries()]
+      .filter(([storedKey]) => storedKey.startsWith(prefix))
+      .map(([, fact]) => fact)
+      .filter((fact) => (fact.tier ?? 'reference') === 'core')
       .sort((a, b) => a.key.localeCompare(b.key))
       .slice(0, limit);
   }

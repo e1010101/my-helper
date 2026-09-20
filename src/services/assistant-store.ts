@@ -1,6 +1,7 @@
 import type {
   ConversationMessage,
   Fact,
+  FactTier,
   NewConversationMessage,
   NewReminder,
   PendingActionRecord,
@@ -21,9 +22,15 @@ export interface AssistantStore {
   clearMessages(userId: number): Promise<void>;
 
   // --- Long-lived facts / preferences ---
-  saveFact(userId: number, key: string, value: string): Promise<void>;
+  saveFact(userId: number, key: string, value: string, tier?: FactTier): Promise<void>;
   getFact(userId: number, key: string): Promise<Fact | null>;
   listFacts(userId: number, limit?: number): Promise<Fact[]>;
+  /**
+   * Only the facts that belong in every prompt, ordered core-first. Added
+   * alongside listFacts rather than changing it: this interface has many
+   * consumers, and widening an existing signature risks all of them.
+   */
+  listCoreFacts(userId: number, limit?: number): Promise<Fact[]>;
   deleteFact(userId: number, key: string): Promise<boolean>;
 
   // --- Reminders ---

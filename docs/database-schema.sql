@@ -138,7 +138,24 @@ CREATE TABLE IF NOT EXISTS facts (
   UNIQUE (user_id, key)
 );
 
+-- Facts are ranked by whether the model should know them unprompted.
+--   core      always injected into the prompt (diet, home city, timezone)
+--   reference looked up only when relevant (wifi password, locker code)
+-- Core facts are capped before injection, so this split is what keeps prompt
+-- size bounded while reference material stays available on demand.
+-- Added separately so it applies cleanly to a database created before it.
+ALTER TABLE facts ADD COLUMN IF NOT EXISTS tier TEXT NOT NULL DEFAULT 'reference';
+DO $$
+BEGIN
+  ALTER TABLE facts ADD CONSTRAINT facts_tier_check CHECK (tier IN ('core', 'reference'));
+EXCEPTION WHEN duplicate_object THEN
+  NULL;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_facts_tier ON facts(user_id, tier);
+
 COMMENT ON TABLE facts IS 'Long-lived facts and preferences the assistant remembers about the user';
+COMMENT ON COLUMN facts.tier IS 'core = always in the prompt; reference = looked up on demand';
 
 -- Reminders. next_run_at is an absolute instant; the wall-clock columns
 -- describe recurring schedules so "every Monday 09:00" survives DST changes.

@@ -1,6 +1,6 @@
 import { env } from '../config/env.js';
 import { logger } from './logger.js';
-import { breakdownRequest } from './token-usage.js';
+import { breakdownRequest, buildFactsBlock } from './token-usage.js';
 import type { AssistantStore } from './assistant-store.js';
 import type { AIClient, AgentMessage } from './ai-client.js';
 import type { ToolContext, ToolRegistry, ValidatedCall } from '../tools/registry.js';
@@ -195,9 +195,30 @@ export class AssistantService {
 
   private async runLoop(userId: number, modelMessages: AgentMessage[], now: Date): Promise<ConversationReply> {
     const context: ToolContext = { userId, store: this.store, timezone: this.timezone, now };
+
+    // Core facts shape behaviour unprompted, so they go in the prompt rather
+    // than waiting to be looked up. Capped by buildFactsBlock, and a failure
+    // here must not break the conversation — the block is an enhancement.
+    let facts: { key: string; value: string }[] = [];
+    try {
+      facts = await this.store.listCoreFacts(userId);
+    } catch (error) {
+      logger.error('Failed to load core facts; continuing without them', error);
+    }
+    const factsBlock = buildFactsBlock(facts);
+    if (factsBlock.included > 0 || factsBlock.omitted > 0) {
+      logger.debug('Injecting facts into the prompt', {
+        included: factsBlock.included,
+        omitted: factsBlock.omitted,
+        truncated: factsBlock.truncated,
+      });
+    }
+
     // Live time context for this turn. Regenerated per request so it cannot go
     // stale, and deliberately not persisted into the stored conversation.
-    const systemInstruction = env.systemInstruction(now, this.timezone);
+    const systemInstruction = env.systemInstruction(now, this.timezone, factsBlock.text, {
+      coreFactCount: facts.length,
+    });
     const messages: AgentMessage[] = [...modelMessages];
 
     // Fixed overhead for every request: the system prompt and the serialised

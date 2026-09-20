@@ -16,10 +16,21 @@ export interface NewConversationMessage {
   content: string;
 }
 
+/**
+ * Facts are split by how they should be used.
+ *
+ * `core` facts are injected into every prompt, because the point of them is to
+ * shape behaviour without being asked. `reference` facts are looked up only when
+ * relevant, so they never cost prompt tokens.
+ */
+export type FactTier = 'core' | 'reference';
+
 export interface Fact {
   key: string;
   value: string;
   updatedAt: string;
+  /** Defaults to 'reference' when unset, matching the column default. */
+  tier?: FactTier;
 }
 
 export interface ProfileEntry {

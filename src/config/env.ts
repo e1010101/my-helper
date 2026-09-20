@@ -152,8 +152,16 @@ export const env = {
    * no other way to know it: without this the model either invents a time or
    * reuses one from earlier in the conversation, which makes relative requests
    * like "in 2 minutes" silently wrong.
+   *
+   * `factsBlock` arrives pre-rendered and pre-capped by buildFactsBlock, so this
+   * stays a formatting concern and the size limit lives in one place.
    */
-  systemInstruction(now: Date = new Date(), timezone?: string): string {
+  systemInstruction(
+    now: Date = new Date(),
+    timezone?: string,
+    factsBlock?: string,
+    options: { coreFactCount?: number } = {}
+  ): string {
     const zone = timezone || resolveTimezone();
     const formatted = new Intl.DateTimeFormat('en-GB', {
       timeZone: zone,
@@ -166,7 +174,7 @@ export const env = {
       hour12: false,
     }).format(now);
 
-    return [
+    const lines = [
       this.personalityPrompt(),
       '',
       `Current date and time: ${formatted} (${zone}).`,
@@ -174,7 +182,22 @@ export const env = {
       'For relative requests like "in 10 minutes" or "tomorrow", resolve them against it,',
       'and call a tool to check the current time or scheduled reminders before telling the',
       'user what is already scheduled or when something will happen.',
-    ].join('\n');
+    ];
+
+    if (factsBlock) {
+      lines.push(
+        '',
+        factsBlock,
+        'Apply these when they are relevant without being asked. If a request depends on',
+        'something not shown here, call list_facts before answering.'
+      );
+    } else if ((options.coreFactCount ?? 0) > 0) {
+      // Defensive: facts exist but produced no block, which would mean the block
+      // builder dropped them silently.
+      lines.push('', 'Call list_facts if the user asks what you know about them.');
+    }
+
+    return lines.join('\n');
   },
 
   webhook(): WebhookConfig | undefined {

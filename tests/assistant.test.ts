@@ -422,6 +422,63 @@ test('forgetConversation clears memory but keeps facts', async () => {
   assert.equal((await store.getFact(1, 'home_city'))?.value, 'Singapore');
 });
 
+test('core facts reach the model prompt, so preferences apply unprompted', async () => {
+  // The point of the whole feature: the user should not have to ask for a
+  // stored preference to be honoured. Without injection, "suggest dinner" would
+  // ignore a stored dietary need entirely.
+  const { service, store, client } = makeService([textTurn('ok')]);
+  await store.saveFact(1, 'diet', 'vegetarian', 'core');
+
+  await service.processMessage(1, 'suggest somewhere for dinner');
+
+  const instruction = client.systemInstructions[0];
+  assert.ok(instruction, 'a system instruction was sent');
+  assert.match(instruction, /diet: vegetarian/, 'the core fact is in the prompt');
+  assert.match(instruction, /What you know about the user/);
+});
+
+test('reference facts are not injected, so they cost no context', async () => {
+  const { service, store, client } = makeService([textTurn('ok')]);
+  await store.saveFact(1, 'diet', 'vegetarian', 'core');
+  await store.saveFact(1, 'wifi_password', 'hunter2', 'reference');
+
+  await service.processMessage(1, 'hello');
+
+  const instruction = client.systemInstructions[0] ?? '';
+  assert.match(instruction, /diet: vegetarian/);
+  assert.doesNotMatch(instruction, /hunter2/, 'reference material must stay out of the prompt');
+});
+
+test('a request with no facts carries no facts block', async () => {
+  const { service, client } = makeService([textTurn('ok')]);
+
+  await service.processMessage(1, 'hello');
+
+  const instruction = client.systemInstructions[0] ?? '';
+  assert.doesNotMatch(instruction, /What you know about the user/);
+  assert.doesNotMatch(instruction, /list_facts/, 'no hint needed when there is nothing to list');
+});
+
+test('a fact store failure does not break the conversation', async () => {
+  const store = new InMemoryAssistantStore();
+  store.listCoreFacts = async () => {
+    throw new Error('database down');
+  };
+  const client = new FakeClient([textTurn('Still here.')]);
+  const service = new AssistantService({
+    store,
+    registry: createDefaultToolRegistry(),
+    client,
+    timezone: SINGAPORE,
+    now: () => NOW,
+  });
+
+  const reply = await service.processMessage(1, 'are you there?');
+
+  assert.equal(reply.kind === 'message' && reply.text, 'Still here.');
+  assert.ok(client.systemInstructions[0], 'a prompt was still sent, just without facts');
+});
+
 test('every request carries the current time in the system prompt', async () => {
   // Regression test: without this the model has no idea what time it is, and
   // answers relative questions using a stale time from earlier in the
