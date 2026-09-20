@@ -16,8 +16,7 @@ This document explains all available commands and how to add new ones.
 | `/status` | Admin: health, uptime, memory |
 | `/stats` | Admin: usage statistics |
 
-Any text message that does not start with `/` is answered by Gemini, except while a
-`/prompt` form is in progress.
+Any text message that does not start with `/` is answered by the configured model (DeepSeek by default), except while a `/prompt` form is in progress.
 
 ---
 
@@ -78,8 +77,7 @@ Bot: 🏓 Pong!
 | `/task -update <id>` | Opens the form pre-filled with that task |
 | `/task -delete <id>` | Deletes that task |
 
-Running `/task` with no flag returns the usage summary — the form is opened by
-`/task -create`, not by the bare command.
+Running `/task` with no flag returns the usage summary — the form is opened by `/task -create`, not by the bare command.
 
 **Create flow:**
 1. Bot shows a form with `Name`, `Description`, and `Submit` buttons
@@ -105,8 +103,7 @@ Bot: 📖 Task Details (ID: 12)
      Created: 3/2/2026, 9:14:00 AM
 ```
 
-Task names and descriptions are HTML-escaped before being echoed back, so
-characters like `<`, `&` and `*` cannot break the message or inject formatting.
+Task names and descriptions are HTML-escaped before being echoed back, so characters like `<`, `&` and `*` cannot break the message or inject formatting.
 
 ---
 
@@ -143,9 +140,7 @@ Bot: 📝 Your Tasks (2)
 3. Send comma-separated **tags** (or `skip`)
 4. Send an **image** — the highest resolution Telegram offers is stored, as a `file_id`
 
-Sending text instead of an image at the last step cancels the draft, so a
-half-finished prompt never swallows your subsequent messages. Running `/prompt`
-again discards any existing draft.
+Sending text instead of an image at the last step cancels the draft, so a half-finished prompt never swallows your subsequent messages. Running `/prompt` again discards any existing draft.
 
 ---
 
@@ -165,8 +160,7 @@ again discards any existing draft.
 3. Each result is sent as a photo with its title, tags and prompt text as the caption
 4. `⬅️ Previous` / `Next ➡️` buttons page through multiple results
 
-At least one of `-title` or `-tag` is required. Values may contain hyphens
-(`/getprompt -title my-prompt` works).
+At least one of `-title` or `-tag` is required. Values may contain hyphens (`/getprompt -title my-prompt` works).
 
 ---
 
