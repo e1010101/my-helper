@@ -105,12 +105,37 @@ Any plain text message is handled by the configured model, which can call tools 
 | "remember I'm allergic to peanuts" | Proposes `save_fact`, waits for your Confirm tap |
 | "remind me to call mum tomorrow at 7:30am" | Proposes `create_reminder`, then schedules it |
 | "what do you remember about me?" | Reads back facts and reminders |
+| "what's the weather like?" | Current conditions for your stored home city |
+| "will it rain on Saturday?" | Multi-day outlook, up to 7 days |
 
 **Nothing that writes your data happens without an explicit Confirm tap.** Read-only
 questions are answered directly. Confirmations expire after 10 minutes.
 
 Reminders are stored in Postgres and polled by a scheduler, so they survive restarts;
 a reminder that came due while the bot was offline is delivered marked "(missed earlier)".
+
+### Weather
+
+Weather uses [Open-Meteo](https://open-meteo.com/), which needs **no API key** — so there
+is no fourth credential to provision or rotate.
+
+Ask without naming a place and it falls back to your stored home city, which is why that
+fact is worth marking as `core`:
+
+> "remember as core: my home city is Singapore"
+> "what's the weather like?" → answered for Singapore
+
+Naming a place explicitly always wins, and an unrecognised place is reported back to the
+model as unknown rather than guessed at — it will ask which place you meant instead of
+inventing one.
+
+Two read tools are added: `get_weather` (current conditions plus today) and
+`get_forecast` (up to 7 days, for planning questions). Both are read-only, so neither
+prompts for confirmation. Results are cached for 10 minutes, so asking twice in a row
+costs one API call.
+
+Two tool declarations is not free: they add roughly **257 prompt tokens to every
+request**, which is why the tool set is kept deliberately small.
 
 ### Model providers
 

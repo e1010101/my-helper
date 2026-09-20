@@ -1,4 +1,5 @@
 import { ToolRegistry, type ToolDefinition } from './registry.js';
+import { createWeatherTools } from './weather-tools.js';
 import { formatLocal, parseNaturalTime, WEEKDAY_NAMES } from '../services/reminder-time.js';
 
 /** Renders a call for the confirmation prompt. */
@@ -198,8 +199,11 @@ const addTodo: ToolDefinition = {
  * The default tool set. Every write tool here is gated behind a confirmation,
  * so this list is also the definition of what the assistant may do to the
  * user's data.
+ *
+ * `weatherTools` is injectable so tests can supply a fake WeatherService
+ * instead of reaching Open-Meteo.
  */
-export function createDefaultToolRegistry(): ToolRegistry {
+export function createDefaultToolRegistry(weatherTools: ToolDefinition[] = createWeatherTools()): ToolRegistry {
   return new ToolRegistry([
     currentTime,
     saveFact,
@@ -209,5 +213,6 @@ export function createDefaultToolRegistry(): ToolRegistry {
     cancelReminder,
     listTodos,
     addTodo,
+    ...weatherTools,
   ]);
 }

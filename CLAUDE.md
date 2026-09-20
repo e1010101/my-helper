@@ -65,11 +65,14 @@ src/
 │   ├── gemini-provider.ts  # Gemini implementation
 │   ├── reminder-time.ts    # Timezone maths, recurrence, NL time parsing
 │   ├── reminder-scheduler.ts # Polls due reminders and delivers them
+│   ├── weather.ts          # Open-Meteo client (no API key required)
+│   ├── token-usage.ts      # Token accounting, fact block, fact staleness
 │   ├── health.ts           # Health snapshot for /health and /status
 │   └── logger.ts           # Leveled console logger
 ├── tools/
 │   ├── registry.ts         # Tool registry, classification, arg validation
-│   └── builtin-tools.ts    # Tools the model may call
+│   ├── builtin-tools.ts    # Tools the model may call
+│   └── weather-tools.ts    # get_weather / get_forecast (read-only)
 ├── commands/
 │   ├── index.ts            # Core commands, task form, admin commands
 │   ├── assistant-commands.ts # /forget, /memory
@@ -78,7 +81,10 @@ src/
 ├── types/
 │   └── assistant.ts        # Shared assistant data shapes
 ├── utils/
-│   └── telegram-format.ts  # HTML escaping + Markdown→Telegram HTML
+│   ├── telegram-format.ts  # HTML escaping + Markdown→Telegram HTML
+│   ├── telegram-chunk.ts   # Splits messages to Telegram's 4096-char limit
+│   ├── memory-format.ts    # Renders /memory, including fact staleness
+│   └── weather-format.ts   # WMO codes and reports to readable text
 ├── bot.ts                  # Bot initialization, middleware, HTTP server, wiring
 └── index.ts                # Application entry point
 ```
