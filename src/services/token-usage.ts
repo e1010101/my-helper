@@ -133,6 +133,57 @@ function estimateFromChars(chars: number): number {
 }
 
 /**
+ * Facts older than this are flagged when listed.
+ *
+ * Facts never expire, so a preference recorded months ago may simply no longer
+ * be true. Rather than build expiry machinery, the age is surfaced so the
+ * staleness is visible to the person who can judge it.
+ */
+export const FACT_STALE_AFTER_DAYS = 90;
+
+const MS_PER_DAY = 86_400_000;
+
+export interface FactAge {
+  /** Short human summary, e.g. "3 days ago". */
+  label: string;
+  /** Whole days since the fact was written. */
+  days: number;
+  /** True once the fact is old enough that it may no longer hold. */
+  stale: boolean;
+}
+
+/**
+ * Describes how long ago a fact was written.
+ *
+ * A fact with no usable timestamp reports `days: 0` and is not treated as
+ * stale: unknown age is not evidence of decay, and flagging it would train the
+ * user to ignore the warning.
+ */
+export function describeFactAge(updatedAt: string | undefined, now: Date = new Date()): FactAge {
+  if (!updatedAt) {
+    return { label: 'unknown age', days: 0, stale: false };
+  }
+
+  const then = new Date(updatedAt);
+  if (Number.isNaN(then.getTime())) {
+    return { label: 'unknown age', days: 0, stale: false };
+  }
+
+  const days = Math.floor((now.getTime() - then.getTime()) / MS_PER_DAY);
+
+  // Clock skew or a future timestamp reads as "today" rather than a negative
+  // age, which would look like a bug in the output.
+  if (days <= 0) {
+    return { label: 'today', days: 0, stale: false };
+  }
+
+  const label =
+    days === 1 ? 'yesterday' : days < 30 ? `${days} days ago` : days < 365 ? `${Math.floor(days / 30)} months ago` : `${Math.floor(days / 365)} years ago`;
+
+  return { label, days, stale: days >= FACT_STALE_AFTER_DAYS };
+}
+
+/**
  * Splits the provider's prompt token count across components in proportion to
  * their character length, so the parts always sum to the reported total.
  *

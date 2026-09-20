@@ -8,7 +8,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { breakdownRequest, buildFactsBlock, commonPrefix, estimateTokens, MAX_CORE_FACTS, MAX_FACT_VALUE_CHARS } from '../src/services/token-usage.js';
+import {
+  breakdownRequest,
+  buildFactsBlock,
+  commonPrefix,
+  describeFactAge,
+  estimateTokens,
+  FACT_STALE_AFTER_DAYS,
+  MAX_CORE_FACTS,
+  MAX_FACT_VALUE_CHARS,
+} from '../src/services/token-usage.js';
 import { DeepSeekProvider } from '../src/services/deepseek-provider.js';
 
 const composition = { systemChars: 400, toolsChars: 2000, messagesChars: 600 };
@@ -213,4 +222,63 @@ test('the block size stays within a predictable bound', () => {
   // Worst case is what makes injection affordable: ~20 x 200 chars is about
   // 1,100 tokens, and it cannot grow beyond that no matter how much is stored.
   assert.ok(block.text.length < 6_000, `block was ${block.text.length} chars`);
+});
+
+// --- Fact age / staleness --------------------------------------------------
+
+const NOW = new Date('2026-06-15T12:00:00Z');
+
+/** An ISO timestamp `days` before NOW. */
+function daysAgo(days: number): string {
+  return new Date(NOW.getTime() - days * 86_400_000).toISOString();
+}
+
+test('a fact written today reads as today', () => {
+  const age = describeFactAge(daysAgo(0), NOW);
+
+  assert.equal(age.label, 'today');
+  assert.equal(age.stale, false);
+});
+
+test('a fact from yesterday is singular', () => {
+  assert.equal(describeFactAge(daysAgo(1), NOW).label, 'yesterday');
+});
+
+test('recent facts read in days, older ones in months and years', () => {
+  assert.equal(describeFactAge(daysAgo(5), NOW).label, '5 days ago');
+  assert.equal(describeFactAge(daysAgo(60), NOW).label, '2 months ago');
+  assert.equal(describeFactAge(daysAgo(400), NOW).label, '1 years ago');
+});
+
+test('staleness begins at the threshold, not before', () => {
+  assert.equal(describeFactAge(daysAgo(FACT_STALE_AFTER_DAYS - 1), NOW).stale, false);
+  assert.equal(describeFactAge(daysAgo(FACT_STALE_AFTER_DAYS), NOW).stale, true);
+  assert.equal(describeFactAge(daysAgo(FACT_STALE_AFTER_DAYS + 100), NOW).stale, true);
+});
+
+test('a missing timestamp is unknown age, not stale', () => {
+  // Unknown age is not evidence of decay. Flagging it would train the user to
+  // ignore the warning, which is worse than saying nothing.
+  for (const input of [undefined, '', 'not-a-date']) {
+    const age = describeFactAge(input, NOW);
+    assert.equal(age.label, 'unknown age');
+    assert.equal(age.stale, false);
+  }
+});
+
+test('a future timestamp reads as today rather than a negative age', () => {
+  // Clock skew must not produce "-3 days ago", which reads like a bug.
+  const age = describeFactAge(new Date(NOW.getTime() + 3 * 86_400_000).toISOString(), NOW);
+
+  assert.equal(age.label, 'today');
+  assert.equal(age.days, 0);
+  assert.equal(age.stale, false);
+});
+
+test('age is measured against the supplied clock, not the real one', () => {
+  // Deterministic: the same input yields different results for different nows.
+  const written = daysAgo(100);
+  assert.equal(describeFactAge(written, NOW).stale, true);
+  assert.equal(describeFactAge(written, new Date(NOW.getTime() + 400 * 86_400_000)).stale, true);
+  assert.equal(describeFactAge(new Date(NOW.getTime() + 86_400_000).toISOString(), NOW).label, 'today');
 });

@@ -1,11 +1,6 @@
-/**
- * Extra assistant controls that are not part of the tool set, registered
- * separately so commands/index.ts stays focused on the original bot commands.
- */
 import type { Telegraf, Context } from 'telegraf';
 import type { AssistantService } from '../services/assistant.js';
-import { escapeHtml } from '../utils/telegram-format.js';
-import { formatLocal } from '../services/reminder-time.js';
+import { formatFacts, formatReminders } from '../utils/memory-format.js';
 
 export function registerAssistantCommands(
   bot: Telegraf,
@@ -45,20 +40,10 @@ export function registerAssistantCommands(
         store.listReminders(userId),
       ]);
 
-      const factsText = facts.length > 0
-        ? facts.map((fact) => `• <b>${escapeHtml(fact.key)}</b>: ${escapeHtml(fact.value)}`).join('\n')
-        : '(none yet)';
-
-      const reminderText = reminders.length > 0
-        ? reminders
-          .map((reminder) => `• #${reminder.id} ${escapeHtml(reminder.text)} — ${escapeHtml(formatLocal(new Date(reminder.nextRunAt), timezone))}${reminder.frequency === 'once' ? '' : ` (${reminder.frequency})`}`)
-          .join('\n')
-        : '(none)';
-
       await ctx.reply(
         `🧠 <b>What I remember</b>\n\n` +
-        `<b>Facts &amp; preferences</b>\n${factsText}\n\n` +
-        `<b>Reminders</b>\n${reminderText}\n\n` +
+        `<b>Facts &amp; preferences</b>\n${formatFacts(facts)}\n\n` +
+        `<b>Reminders</b>\n${formatReminders(reminders, timezone)}\n\n` +
         `<b>Conversation</b>\n${messages} stored message(s)`,
         { parse_mode: 'HTML' }
       );
