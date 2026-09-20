@@ -1,6 +1,6 @@
 import { env } from '../config/env.js';
 import { logger } from './logger.js';
-import { buildToolNameIndex, type AIClient, type AgentMessage, type ModelTurn, type ToolCall } from './ai-client.js';
+import { buildToolNameIndex, type AIClient, type AgentMessage, type ModelTurn, type TokenUsage, type ToolCall } from './ai-client.js';
 
 /**
  * DeepSeek client.
@@ -34,8 +34,17 @@ interface OpenAIChoiceMessage {
   tool_calls?: OpenAIToolCall[];
 }
 
+interface OpenAIUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  prompt_cache_hit_tokens?: number;
+  prompt_tokens_details?: { cached_tokens?: number };
+}
+
 interface OpenAIResponse {
   choices?: { message?: OpenAIChoiceMessage; finish_reason?: string }[];
+  usage?: OpenAIUsage;
   error?: { message?: string; type?: string };
 }
 
@@ -167,7 +176,7 @@ export class DeepSeekProvider implements AIClient {
         args: parseToolArguments(call.function?.arguments, call.function!.name!),
       }));
 
-    return { text: message.content ?? '', toolCalls };
+    return { text: message.content ?? '', toolCalls, usage: toTokenUsage(response.usage) };
   }
 
   async generateText(prompt: string, systemInstruction?: string): Promise<string> {
@@ -221,8 +230,27 @@ export class DeepSeekProvider implements AIClient {
   }
 }
 
-/** Models occasionally emit arguments that fail to parse; log and use {}. */
-function parseToolArguments(raw: string | undefined, toolName: string): Record<string, unknown> {
+/**
+ * Maps the provider's usage block onto our neutral shape. Returns undefined
+ * when the response carried no accounting, so callers can tell "no data" from
+ * "zero tokens".
+ */
+function toTokenUsage(usage: OpenAIUsage | undefined): TokenUsage | undefined {
+  if (!usage || typeof usage.prompt_tokens !== 'number') {
+    return undefined;
+  }
+
+  const cached = usage.prompt_cache_hit_tokens ?? usage.prompt_tokens_details?.cached_tokens;
+
+  return {
+    promptTokens: usage.prompt_tokens,
+    completionTokens: usage.completion_tokens ?? 0,
+    totalTokens: usage.total_tokens ?? usage.prompt_tokens,
+    ...(typeof cached === 'number' ? { cachedTokens: cached } : {}),
+  };
+}
+
+/** Models occasionally emit arguments that fail to parse; log and use {}. */function parseToolArguments(raw: string | undefined, toolName: string): Record<string, unknown> {
   if (!raw || !raw.trim()) {
     return {};
   }

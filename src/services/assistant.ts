@@ -1,5 +1,6 @@
 import { env } from '../config/env.js';
 import { logger } from './logger.js';
+import { breakdownRequest } from './token-usage.js';
 import type { AssistantStore } from './assistant-store.js';
 import type { AIClient, AgentMessage } from './ai-client.js';
 import type { ToolContext, ToolRegistry, ValidatedCall } from '../tools/registry.js';
@@ -199,8 +200,39 @@ export class AssistantService {
     const systemInstruction = env.systemInstruction(now, this.timezone);
     const messages: AgentMessage[] = [...modelMessages];
 
+    // Fixed overhead for every request: the system prompt and the serialised
+    // tool declarations. Knowing this is what distinguishes "memory is bloating
+    // requests" from "the tool schemas are simply expensive".
+    const toolsChars = JSON.stringify(this.registry.toFunctionDeclarations()).length;
+    const systemChars = systemInstruction.length;
+    const messageChars = messages.reduce((total, message) => total + JSON.stringify(message).length, 0);
+
+    logger.info('Request composition', {
+      systemChars,
+      toolsChars,
+      messageChars,
+      messages: messages.length,
+    });
+
     for (let iteration = 0; iteration < this.maxToolIterations; iteration++) {
       const turn = await this.client.generate(messages, this.registry, systemInstruction);
+
+      if (turn.usage) {
+        const breakdown = breakdownRequest(
+          { systemChars, toolsChars, messagesChars: messageChars },
+          turn.usage.promptTokens
+        );
+        logger.info('Token usage', {
+          prompt: turn.usage.promptTokens,
+          completion: turn.usage.completionTokens,
+          total: turn.usage.totalTokens,
+          cached: turn.usage.cachedTokens ?? 0,
+          ofPrompt: { system: breakdown.system, tools: breakdown.tools, messages: breakdown.messages },
+          iteration,
+        });
+      } else {
+        logger.debug('Provider returned no token usage for this turn', { iteration });
+      }
 
       if (turn.toolCalls.length === 0) {
         const text = turn.text.trim() || DEGRADED_REPLY;

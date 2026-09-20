@@ -1,10 +1,27 @@
 import { GoogleGenAI, createPartFromFunctionResponse, createPartFromText, type Content, type Part } from '@google/genai';
 import { env } from '../config/env.js';
-import { buildToolNameIndex, type AIClient, type AgentMessage, type ModelTurn } from './ai-client.js';
+import { buildToolNameIndex, type AIClient, type AgentMessage, type ModelTurn, type TokenUsage } from './ai-client.js';
 import type { ToolRegistry } from '../tools/registry.js';
 
 /** Loose shape so this provider need not depend on the registry's full type. */
 type RegistryLike = { list(): unknown[]; toFunctionDeclarations(): unknown[] };
+
+/** Maps Gemini's usageMetadata onto the neutral shape, or undefined if absent. */
+function toTokenUsage(
+  usage: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number; cachedContentTokenCount?: number } | undefined
+): TokenUsage | undefined {
+  if (!usage || typeof usage.promptTokenCount !== 'number') {
+    return undefined;
+  }
+  return {
+    promptTokens: usage.promptTokenCount,
+    completionTokens: usage.candidatesTokenCount ?? 0,
+    totalTokens: usage.totalTokenCount ?? usage.promptTokenCount,
+    ...(typeof usage.cachedContentTokenCount === 'number'
+      ? { cachedTokens: usage.cachedContentTokenCount }
+      : {}),
+  };
+}
 
 interface GeminiClientOptions {
   apiKey?: string;
@@ -108,7 +125,7 @@ export class GeminiProvider implements AIClient {
         args: call.args ?? {},
       }));
 
-    return { text: response.text ?? '', toolCalls };
+    return { text: response.text ?? '', toolCalls, usage: toTokenUsage(response.usageMetadata) };
   }
 
   async generateText(prompt: string, systemInstruction?: string): Promise<string> {

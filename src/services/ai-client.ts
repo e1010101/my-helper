@@ -17,10 +17,25 @@ export type AgentMessage =
   | { role: 'assistant'; content: string; toolCalls?: ToolCall[] }
   | { role: 'tool'; toolCallId: string; content: string; isError?: boolean };
 
+/**
+ * Token accounting as reported by the provider.
+ *
+ * Optional because not every provider returns it on every response, and the
+ * loop must not depend on it to function — it exists for measurement.
+ */
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  /** Prompt tokens served from the provider's cache, when reported. */
+  cachedTokens?: number;
+}
+
 /** One model turn: text, tool calls, or both. */
 export interface ModelTurn {
   text: string;
   toolCalls: ToolCall[];
+  usage?: TokenUsage;
 }
 
 export interface AIClient {
