@@ -31,9 +31,9 @@ interface GeminiClientOptions {
 
 export class GeminiProvider implements AIClient {
   readonly name = 'gemini';
+  readonly model: string;
 
   private readonly ai: GoogleGenAI;
-  private readonly model: string;
   private readonly systemInstruction: string;
 
   constructor(options: GeminiClientOptions = {}) {

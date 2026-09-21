@@ -251,6 +251,27 @@ export class AssistantService {
           ofPrompt: { system: breakdown.system, tools: breakdown.tools, messages: breakdown.messages },
           iteration,
         });
+
+        // Persisted so growth is visible over months, which platform log
+        // windows cannot show. Failure is swallowed on purpose: a measurement
+        // write must never break a reply the user is waiting for.
+        await this.store
+          .recordTokenUsage({
+            userId,
+            provider: this.client.name,
+            model: this.client.model,
+            promptTokens: turn.usage.promptTokens,
+            completionTokens: turn.usage.completionTokens,
+            totalTokens: turn.usage.totalTokens,
+            cachedTokens: turn.usage.cachedTokens ?? 0,
+            systemTokens: breakdown.system,
+            toolsTokens: breakdown.tools,
+            messagesTokens: breakdown.messages,
+            iteration,
+          })
+          .catch((error) => {
+            logger.warn('Failed to record token usage', { reason: String(error) });
+          });
       } else {
         logger.debug('Provider returned no token usage for this turn', { iteration });
       }

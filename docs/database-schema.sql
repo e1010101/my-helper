@@ -227,6 +227,35 @@ CREATE TABLE IF NOT EXISTS health_probes (
 
 COMMENT ON TABLE health_probes IS 'Single-row target used by the readiness write probe';
 
+-- Token accounting, one row per model call.
+--
+-- The provider reports real token counts but no history, and platform log
+-- windows do not go back far enough to answer "is the prompt growing?". This
+-- table makes that question answerable from data. The component columns are
+-- shares of prompt_tokens, so system + tools + messages = prompt_tokens, which
+-- is what shows whether memory or the tool schemas are responsible.
+CREATE TABLE IF NOT EXISTS token_usage (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  prompt_tokens INTEGER NOT NULL,
+  completion_tokens INTEGER NOT NULL DEFAULT 0,
+  total_tokens INTEGER NOT NULL DEFAULT 0,
+  cached_tokens INTEGER NOT NULL DEFAULT 0,
+  system_tokens INTEGER NOT NULL DEFAULT 0,
+  tools_tokens INTEGER NOT NULL DEFAULT 0,
+  messages_tokens INTEGER NOT NULL DEFAULT 0,
+  /** Which pass through the tool loop this call was (0 = first). */
+  iteration SMALLINT NOT NULL DEFAULT 0,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+COMMENT ON TABLE token_usage IS 'Per-call token accounting, for watching prompt growth over time';
+
+-- The reporting query: recent usage for one user, newest first.
+CREATE INDEX IF NOT EXISTS idx_token_usage_user_created ON token_usage(user_id, created_at DESC);
+
 -- ============================================================
 -- Row Level Security
 -- ============================================================
@@ -241,6 +270,7 @@ ALTER TABLE reminders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE pending_actions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE credentials ENABLE ROW LEVEL SECURITY;
 ALTER TABLE health_probes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE token_usage ENABLE ROW LEVEL SECURITY;
 
 DO $$
 DECLARE
@@ -255,7 +285,7 @@ BEGIN
     RETURN;
   END IF;
 
-  FOREACH target IN ARRAY ARRAY['conversations', 'facts', 'reminders', 'pending_actions', 'credentials', 'health_probes']
+  FOREACH target IN ARRAY ARRAY['conversations', 'facts', 'reminders', 'pending_actions', 'credentials', 'health_probes', 'token_usage']
   LOOP
     -- CREATE POLICY has no IF NOT EXISTS, so a duplicate is swallowed by name.
     -- That keeps this file safe to re-run, which matters because it is applied

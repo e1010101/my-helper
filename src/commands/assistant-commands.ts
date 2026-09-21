@@ -1,6 +1,9 @@
 import type { Telegraf, Context } from 'telegraf';
 import type { AssistantService } from '../services/assistant.js';
-import { formatFacts, formatReminders } from '../utils/memory-format.js';
+import { formatFacts, formatReminders, formatUsage } from '../utils/memory-format.js';
+
+/** How far back the token usage summary looks. */
+const USAGE_WINDOW_DAYS = 30;
 
 export function registerAssistantCommands(
   bot: Telegraf,
@@ -34,17 +37,27 @@ export function registerAssistantCommands(
 
     try {
       const store = assistant.getStore();
-      const [facts, messages, reminders] = await Promise.all([
+      const usageSince = new Date(Date.now() - USAGE_WINDOW_DAYS * 86_400_000);
+
+      const [facts, messages, reminders, usage] = await Promise.all([
         store.listFacts(userId),
         store.countMessages(userId),
         store.listReminders(userId),
+        // Usage is the newest addition, so a database predating the table would
+        // otherwise break the whole command. Degrade to a note instead.
+        store.summariseTokenUsage(userId, usageSince).catch(() => null),
       ]);
+
+      const usageText = usage
+        ? formatUsage(usage, USAGE_WINDOW_DAYS)
+        : '(unavailable — has the token_usage table been created?)';
 
       await ctx.reply(
         `🧠 <b>What I remember</b>\n\n` +
         `<b>Facts &amp; preferences</b>\n${formatFacts(facts)}\n\n` +
         `<b>Reminders</b>\n${formatReminders(reminders, timezone)}\n\n` +
-        `<b>Conversation</b>\n${messages} stored message(s)`,
+        `<b>Conversation</b>\n${messages} stored message(s)\n\n` +
+        `<b>Token usage</b>\n${usageText}`,
         { parse_mode: 'HTML' }
       );
     } catch (error) {

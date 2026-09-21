@@ -10,7 +10,16 @@ import type {
   PendingActionRecord,
   Reminder,
   ReminderFrequency,
+  TokenUsageRecord,
+  TokenUsageSummary,
 } from '../types/assistant.js';
+
+/**
+ * Upper bound on rows read for a usage summary. A month of heavy use is well
+ * under this; the cap exists so a pathological window cannot pull unbounded
+ * data into memory.
+ */
+const MAX_USAGE_ROWS = 5000;
 
 interface MessageRow {
   id: number;
@@ -410,5 +419,83 @@ export class SupabaseAssistantStore implements AssistantStore {
     }
 
     return data?.length ?? 0;
+  }
+
+  async recordTokenUsage(record: TokenUsageRecord): Promise<void> {
+    const { error } = await this.client.from('token_usage').insert({
+      user_id: record.userId,
+      provider: record.provider,
+      model: record.model,
+      prompt_tokens: record.promptTokens,
+      completion_tokens: record.completionTokens,
+      total_tokens: record.totalTokens,
+      cached_tokens: record.cachedTokens,
+      system_tokens: record.systemTokens,
+      tools_tokens: record.toolsTokens,
+      messages_tokens: record.messagesTokens,
+      iteration: record.iteration,
+    });
+
+    if (error) {
+      throw new Error(`Failed to record token usage: ${error.message}`);
+    }
+  }
+
+  /**
+   * Aggregates in the database rather than fetching rows: this table grows by
+   * one row per model call, so pulling a window into memory would get slower
+   * every month. PostgREST exposes no aggregate functions, so the window is
+   * fetched column-limited and summed here — bounded by the window rather than
+   * by total history.
+   */
+  async summariseTokenUsage(userId: number, since: Date): Promise<TokenUsageSummary> {
+    const { data, error } = await this.client
+      .from('token_usage')
+      .select('prompt_tokens, completion_tokens, total_tokens, cached_tokens, created_at')
+      .eq('user_id', userId)
+      .gte('created_at', since.toISOString())
+      .order('created_at', { ascending: true })
+      .limit(MAX_USAGE_ROWS);
+
+    if (error) {
+      throw new Error(`Failed to summarise token usage: ${error.message}`);
+    }
+
+    const rows = (data ?? []) as {
+      prompt_tokens: number;
+      completion_tokens: number;
+      total_tokens: number;
+      cached_tokens: number;
+      created_at: string;
+    }[];
+
+    if (rows.length === 0) {
+      return {
+        calls: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        cachedTokens: 0,
+        averagePromptTokens: 0,
+        firstRecordedAt: null,
+        lastRecordedAt: null,
+      };
+    }
+
+    const sum = (pick: (row: (typeof rows)[number]) => number) =>
+      rows.reduce((total, row) => total + (pick(row) ?? 0), 0);
+
+    const promptTokens = sum((row) => row.prompt_tokens);
+
+    return {
+      calls: rows.length,
+      promptTokens,
+      completionTokens: sum((row) => row.completion_tokens),
+      totalTokens: sum((row) => row.total_tokens),
+      cachedTokens: sum((row) => row.cached_tokens),
+      averagePromptTokens: Math.round(promptTokens / rows.length),
+      firstRecordedAt: rows[0].created_at,
+      lastRecordedAt: rows[rows.length - 1].created_at,
+    };
   }
 }

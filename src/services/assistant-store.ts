@@ -6,6 +6,8 @@ import type {
   NewReminder,
   PendingActionRecord,
   Reminder,
+  TokenUsageRecord,
+  TokenUsageSummary,
 } from '../types/assistant.js';
 
 /**
@@ -51,6 +53,15 @@ export interface AssistantStore {
   getPendingAction(id: number, userId: number): Promise<PendingActionRecord | null>;
   deletePendingAction(id: number): Promise<void>;
   deleteExpiredPendingActions(now: Date): Promise<number>;
+
+  // --- Token accounting ---
+  /**
+   * Records one model call. Implementations should be tolerant of failure at
+   * the call site rather than here: measurement must never break a reply.
+   */
+  recordTokenUsage(record: TokenUsageRecord): Promise<void>;
+  /** Aggregate over records newer than `since`. */
+  summariseTokenUsage(userId: number, since: Date): Promise<TokenUsageSummary>;
 }
 
 /** Replaceable clock so time-dependent behaviour can be tested deterministically. */

@@ -6,6 +6,8 @@ import type {
   NewReminder,
   PendingActionRecord,
   Reminder,
+  TokenUsageRecord,
+  TokenUsageSummary,
 } from '../types/assistant.js';
 import type { AssistantStore } from './assistant-store.js';
 
@@ -18,6 +20,7 @@ export class InMemoryAssistantStore implements AssistantStore {
   private facts = new Map<string, Fact>();
   private reminders: Reminder[] = [];
   private pendingActions: PendingActionRecord[] = [];
+  private tokenUsage: (TokenUsageRecord & { createdAt: string })[] = [];
   private messageId = 1;
   private reminderId = 1;
   private pendingId = 1;
@@ -173,5 +176,46 @@ export class InMemoryAssistantStore implements AssistantStore {
       (action) => new Date(action.expiresAt) > now
     );
     return before - this.pendingActions.length;
+  }
+
+  async recordTokenUsage(record: TokenUsageRecord): Promise<void> {
+    this.tokenUsage.push({ ...record, createdAt: new Date().toISOString() });
+  }
+
+  async summariseTokenUsage(userId: number, since: Date): Promise<TokenUsageSummary> {
+    const sinceMs = since.getTime();
+    const rows = this.tokenUsage.filter(
+      (row) => row.userId === userId && new Date(row.createdAt).getTime() >= sinceMs
+    );
+
+    if (rows.length === 0) {
+      return {
+        calls: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        cachedTokens: 0,
+        averagePromptTokens: 0,
+        firstRecordedAt: null,
+        lastRecordedAt: null,
+      };
+    }
+
+    const sum = (pick: (row: typeof rows[number]) => number) =>
+      rows.reduce((total, row) => total + pick(row), 0);
+
+    const promptTokens = sum((row) => row.promptTokens);
+    const timestamps = rows.map((row) => row.createdAt).sort();
+
+    return {
+      calls: rows.length,
+      promptTokens,
+      completionTokens: sum((row) => row.completionTokens),
+      totalTokens: sum((row) => row.totalTokens),
+      cachedTokens: sum((row) => row.cachedTokens),
+      averagePromptTokens: Math.round(promptTokens / rows.length),
+      firstRecordedAt: timestamps[0],
+      lastRecordedAt: timestamps[timestamps.length - 1],
+    };
   }
 }

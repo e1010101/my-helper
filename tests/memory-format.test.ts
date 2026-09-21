@@ -8,9 +8,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { countStaleFacts, formatFacts, formatReminders } from '../src/utils/memory-format.js';
+import { countStaleFacts, formatFacts, formatReminders, formatUsage } from '../src/utils/memory-format.js';
 import { FACT_STALE_AFTER_DAYS } from '../src/services/token-usage.js';
-import type { Fact, Reminder } from '../src/types/assistant.js';
+import type { Fact, Reminder, TokenUsageSummary } from '../src/types/assistant.js';
 
 const NOW = new Date('2026-06-15T12:00:00Z');
 
@@ -138,4 +138,57 @@ test('a one-off reminder omits the cadence suffix', () => {
   ];
 
   assert.doesNotMatch(formatReminders(reminders, 'Asia/Singapore'), /\(once\)/);
+});
+
+// --- Token usage summary ---------------------------------------------------
+
+function summary(overrides: Partial<TokenUsageSummary> = {}): TokenUsageSummary {
+  return {
+    calls: 10,
+    promptTokens: 10_000,
+    completionTokens: 1_000,
+    totalTokens: 11_000,
+    cachedTokens: 4_000,
+    averagePromptTokens: 1_000,
+    firstRecordedAt: NOW.toISOString(),
+    lastRecordedAt: NOW.toISOString(),
+    ...overrides,
+  };
+}
+
+test('an empty window says so rather than showing zeroes', () => {
+  const text = formatUsage(summary({ calls: 0, promptTokens: 0, totalTokens: 0, averagePromptTokens: 0 }), 30);
+
+  assert.match(text, /no calls recorded/);
+  assert.match(text, /30 days/);
+  assert.doesNotMatch(text, /\b0 tokens\b/);
+});
+
+test('the summary reports calls, totals and the average prompt size', () => {
+  const text = formatUsage(summary(), 30);
+
+  assert.match(text, /10 model call/);
+  assert.match(text, /11,000 tokens total/);
+  // The average is the number that reveals creeping prompt size; a total alone
+  // cannot distinguish "used more" from "asks got longer".
+  assert.match(text, /average prompt: 1,000 tokens/);
+});
+
+test('the cache share is reported as a percentage', () => {
+  assert.match(formatUsage(summary(), 30), /40% of prompt tokens served from cache/);
+});
+
+test('a zero-token window does not divide by zero for the cache share', () => {
+  const text = formatUsage(summary({ promptTokens: 0, cachedTokens: 0, calls: 1 }), 30);
+
+  assert.match(text, /0% of prompt tokens/);
+  assert.doesNotMatch(text, /NaN/);
+});
+
+test('cache share is computed against prompt tokens, not the grand total', () => {
+  // Using the total would understate the share, since completion tokens can
+  // never be cached.
+  const text = formatUsage(summary({ promptTokens: 1_000, cachedTokens: 1_000, totalTokens: 5_000 }), 30);
+
+  assert.match(text, /100% of prompt tokens/);
 });

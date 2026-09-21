@@ -5,7 +5,7 @@
  * without driving a bot update, since the only way to seed an aged fact in a
  * test would otherwise be a test-only seam in the store interface.
  */
-import type { Fact, Reminder } from '../types/assistant.js';
+import type { Fact, Reminder, TokenUsageSummary } from '../types/assistant.js';
 import { escapeHtml } from './telegram-format.js';
 import { formatLocal } from '../services/reminder-time.js';
 import { describeFactAge, FACT_STALE_AFTER_DAYS } from '../services/token-usage.js';
@@ -55,4 +55,28 @@ export function formatReminders(reminders: Reminder[], timezone: string): string
       return `• #${reminder.id} ${escapeHtml(reminder.text)} — ${escapeHtml(when)}${cadence}`;
     })
     .join('\n');
+}
+
+/**
+ * Renders token usage for the window.
+ *
+ * The average prompt size is the point of this: a total tells you what you have
+ * spent, but the average is what reveals whether prompts are creeping up as
+ * facts and history accumulate.
+ */
+export function formatUsage(summary: TokenUsageSummary, days: number): string {
+  if (summary.calls === 0) {
+    return `(no calls recorded in the last ${days} days)`;
+  }
+
+  const cacheShare = summary.promptTokens > 0
+    ? Math.round((summary.cachedTokens / summary.promptTokens) * 100)
+    : 0;
+
+  return [
+    `${summary.calls} model call(s) in the last ${days} days`,
+    `• ${summary.totalTokens.toLocaleString('en-GB')} tokens total`,
+    `• average prompt: ${summary.averagePromptTokens.toLocaleString('en-GB')} tokens`,
+    `• ${cacheShare}% of prompt tokens served from cache`,
+  ].join('\n');
 }

@@ -41,6 +41,8 @@ export interface ModelTurn {
 export interface AIClient {
   /** Provider name, for logging. */
   readonly name: string;
+  /** Concrete model in use, recorded alongside token usage so a change is visible. */
+  readonly model: string;
   /**
    * One model turn. The registry supplies the tools the model may call; it is
    * typed loosely to keep this contract free of a circular import.

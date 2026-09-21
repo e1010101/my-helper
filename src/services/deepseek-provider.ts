@@ -56,9 +56,9 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 
 export class DeepSeekProvider implements AIClient {
   readonly name = 'deepseek';
+  readonly model: string;
 
   private readonly apiKey: string;
-  private readonly model: string;
   private readonly systemInstruction: string;
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;

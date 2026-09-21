@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { AssistantService } from '../src/services/assistant.js';
-import type { AIClient, AgentMessage, ModelTurn } from '../src/services/ai-client.js';
+import type { AIClient, AgentMessage, ModelTurn, TokenUsage } from '../src/services/ai-client.js';
 import { InMemoryAssistantStore } from '../src/services/in-memory-assistant-store.js';
 import { createDefaultToolRegistry } from '../src/tools/builtin-tools.js';
 import { localKey } from '../src/services/reminder-time.js';
@@ -55,8 +55,11 @@ function assertValidConversation(messages: AgentMessage[]): void {
 /** Scripted AI client that records what it was asked. */
 class FakeClient implements AIClient {
   readonly name = 'fake';
+  readonly model = 'fake-model';
   readonly calls: AgentMessage[][] = [];
   readonly systemInstructions: (string | undefined)[] = [];
+  /** Set to have every turn report token accounting, as a real provider does. */
+  usage?: TokenUsage;
 
   constructor(private readonly script: ModelTurn[]) {}
 
@@ -72,7 +75,7 @@ class FakeClient implements AIClient {
     if (!next) {
       throw new Error('FakeClient ran out of scripted turns');
     }
-    return next;
+    return { ...next, ...(this.usage ? { usage: this.usage } : {}) };
   }
 
   async generateText(): Promise<string> {
@@ -325,6 +328,7 @@ test('the tool loop stops instead of spinning forever', async () => {
   const store = new InMemoryAssistantStore();
   const client: AIClient = {
     name: 'looping-fake',
+    model: 'looping-fake',
     async generate() {
       return callTurn({ id: 'c', name: 'current_time' });
     },
@@ -420,6 +424,66 @@ test('forgetConversation clears memory but keeps facts', async () => {
 
   assert.equal(await store.countMessages(1), 0);
   assert.equal((await store.getFact(1, 'home_city'))?.value, 'Singapore');
+});
+
+// --- Token usage persistence ----------------------------------------------
+
+test('each model call records its usage, including the component split', async () => {
+  const { service, store, client } = makeService([callTurn({ id: 'c1', name: 'current_time' }), textTurn('done')]);
+
+  // Give the fake client usage to report.
+  client.usage = { promptTokens: 900, completionTokens: 20, totalTokens: 920, cachedTokens: 500 };
+
+  await service.processMessage(1, 'what time is it?');
+
+  const summary = await store.summariseTokenUsage(1, new Date(Date.now() - 3_600_000));
+  assert.equal(summary.calls, 2, 'one record per model call, not per user message');
+  assert.equal(summary.promptTokens, 1800);
+  assert.equal(summary.cachedTokens, 1000);
+  assert.equal(summary.averagePromptTokens, 900);
+});
+
+test('a turn without usage records nothing rather than a zero row', async () => {
+  const { service, store } = makeService([textTurn('done')]);
+
+  // The default fake reports no usage, which is what a provider that omits the
+  // accounting block looks like.
+  await service.processMessage(1, 'hello');
+
+  assert.equal((await store.summariseTokenUsage(1, new Date(Date.now() - 3_600_000))).calls, 0);
+});
+
+test('a usage-write failure does not break the reply', async () => {
+  // Measurement must never cost the user an answer.
+  const store = new InMemoryAssistantStore();
+  store.recordTokenUsage = async () => {
+    throw new Error('database down');
+  };
+  const client = new FakeClient([textTurn('Still here.')]);
+  client.usage = { promptTokens: 100, completionTokens: 5, totalTokens: 105 };
+
+  const service = new AssistantService({
+    store,
+    registry: createDefaultToolRegistry(),
+    client,
+    timezone: SINGAPORE,
+    now: () => NOW,
+  });
+
+  const reply = await service.processMessage(1, 'are you there?');
+
+  assert.equal(reply.kind === 'message' && reply.text, 'Still here.');
+});
+
+test('the recorded model is the concrete model, not a placeholder', async () => {
+  const { service, store, client } = makeService([textTurn('done')]);
+  client.usage = { promptTokens: 10, completionTokens: 1, totalTokens: 11 };
+
+  await service.processMessage(1, 'hi');
+
+  const rows = (store as unknown as { tokenUsage: { model: string; provider: string }[] }).tokenUsage;
+  assert.equal(rows[0].model, 'fake-model');
+  assert.equal(rows[0].provider, 'fake');
 });
 
 test('core facts reach the model prompt, so preferences apply unprompted', async () => {

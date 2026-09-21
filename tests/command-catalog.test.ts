@@ -33,7 +33,12 @@ function registeredNames(): Set<string> {
     store,
     // Empty registry: this test is about command wiring, not tools.
     registry: { list: () => [], toFunctionDeclarations: () => [] } as never,
-    client: { name: 'noop', generate: async () => ({ text: '', toolCalls: [] }), generateText: async () => '' },
+    client: {
+      name: 'noop',
+      model: 'noop',
+      generate: async () => ({ text: '', toolCalls: [] }),
+      generateText: async () => '',
+    },
     timezone: 'UTC',
   });
 

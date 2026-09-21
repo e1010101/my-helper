@@ -78,3 +78,32 @@ export interface PendingActionRecord {
   createdAt: string;
   expiresAt: string;
 }
+
+/** One model call, as recorded for later reporting. */
+export interface TokenUsageRecord {
+  userId: number;
+  provider: string;
+  model: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cachedTokens: number;
+  /** Shares of promptTokens, so the three sum to the prompt total. */
+  systemTokens: number;
+  toolsTokens: number;
+  messagesTokens: number;
+  iteration: number;
+}
+
+/** Aggregate over a window, for the /memory summary. */
+export interface TokenUsageSummary {
+  calls: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cachedTokens: number;
+  /** Mean prompt size — the number that reveals slow growth. */
+  averagePromptTokens: number;
+  firstRecordedAt: string | null;
+  lastRecordedAt: string | null;
+}
