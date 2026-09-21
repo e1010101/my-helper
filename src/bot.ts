@@ -2,6 +2,7 @@ import { Telegraf, Markup, type Context } from 'telegraf';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { env } from './config/env.js';
 import { registerCommands, isUserInPromptFlow } from './commands/index.js';
+import { toBotCommands } from './commands/catalog.js';
 import { db } from './services/database.js';
 import { HealthService } from './services/health.js';
 import { logger } from './services/logger.js';
@@ -425,6 +426,51 @@ export class Bot {
         mode: 'polling',
         healthEndpoint: `http://localhost:${port}/health`,
       });
+    }
+
+    // Registered last so a failure cannot stop the bot serving. Polling mode
+    // reaches getMe inside launch(), which is why this sits after both branches.
+    await this.publishCommandMenu();
+  }
+
+  /**
+   * Registers the command menu Telegram shows when the user types `/`.
+   *
+   * Published on every boot rather than by a one-off script: the menu is derived
+   * from the same catalog as /help, so keeping it in sync is automatic and there
+   * is nothing to remember to re-run after adding a command.
+   *
+   * The admin gets a wider menu, scoped to their chat only, so admin commands
+   * neither clutter the list for anyone else nor leak what exists.
+   */
+  private async publishCommandMenu(): Promise<void> {
+    const ownerChatId = this.ownerChatId();
+
+    try {
+      await this.retryOnRateLimit(() =>
+        this.bot.telegram.setMyCommands(toBotCommands(false))
+      );
+      logger.info('Published command menu', { commands: toBotCommands(false).length });
+    } catch (error) {
+      logger.warn('Could not publish the default command menu', { reason: String(error) });
+    }
+
+    if (ownerChatId === null) {
+      return;
+    }
+
+    try {
+      await this.retryOnRateLimit(() =>
+        this.bot.telegram.setMyCommands(toBotCommands(true), {
+          scope: { type: 'chat', chat_id: ownerChatId },
+        })
+      );
+      logger.info('Published admin command menu', {
+        commands: toBotCommands(true).length,
+        chatId: ownerChatId,
+      });
+    } catch (error) {
+      logger.warn('Could not publish the admin command menu', { reason: String(error) });
     }
   }
 

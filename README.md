@@ -95,6 +95,11 @@ npm start
 - `/status` - Check bot health, uptime, and system status
 - `/stats` - View usage statistics and top commands
 
+Typing `/` in Telegram shows this list as a menu, published automatically on every
+startup from [src/commands/catalog.ts](src/commands/catalog.ts) — the same source that
+builds `/help`, so the two cannot drift apart. Admin commands appear in your own chat
+only, not for anyone else.
+
 ### Talking to the assistant
 
 Any plain text message is handled by the configured model, which can call tools against your own data:

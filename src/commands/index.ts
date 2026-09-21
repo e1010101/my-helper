@@ -3,6 +3,7 @@ import { promptCommand, promptTextInputHandler, promptPhotoInputHandler, isUserI
 import { getPromptCommand, getPromptActionHandler } from './getprompt.js';
 import { db, Task } from '../services/database.js';
 import { escapeHtml } from '../utils/telegram-format.js';
+import { renderHelpText } from './catalog.js';
 
 export { isUserInPromptFlow };
 
@@ -134,38 +135,9 @@ async function helpCommand(ctx: Context) {
   const userId = ctx.from?.id;
   const isAdminUser = isAdmin(userId);
 
-  let helpText = `
-🤖 *Available Commands:*
-
-/start - Start the bot and see welcome message
-/help - Show this help message
-/ping - Check if the bot is responsive
-/task - Create a new to-do task (or use flags)
-  \`-create\` : Create a task
-  \`-read <id>\` : View task details (\`all\` to list all)
-  \`-update <id>\` : Edit a task
-  \`-delete <id>\` : Delete a task
-/tasks - List your saved tasks
-/prompt - Create and save a new prompt template
-/getprompt - Retrieve saved prompts
-  \`-title <text>\` : Search by title
-  \`-tag <tag1,tag2>\` : Search by tags
-/forget - Clear the assistant's conversation memory
-/memory - Show what the assistant remembers about you
-`;
-
-  if (isAdminUser) {
-    helpText += `
-*Admin Commands:*
-/status - Check bot health and uptime
-/stats - View usage statistics
-`;
-  }
-
-  helpText += `\n_Just talk to me in plain text for anything else — I can set reminders, remember facts and manage tasks._`;
-  helpText += `\n_More commands coming soon!_`;
-
-  await ctx.reply(helpText, { parse_mode: 'Markdown' });
+  // Rendered from the catalog so the help text and Telegram's command menu
+  // cannot disagree about what exists.
+  await ctx.reply(renderHelpText(isAdminUser), { parse_mode: 'Markdown' });
 }
 
 async function pingCommand(ctx: Context) {

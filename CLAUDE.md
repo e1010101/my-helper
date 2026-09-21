@@ -74,6 +74,7 @@ src/
 │   ├── builtin-tools.ts    # Tools the model may call
 │   └── weather-tools.ts    # get_weather / get_forecast (read-only)
 ├── commands/
+│   ├── catalog.ts          # Single source of truth: menu, /help, registration
 │   ├── index.ts            # Core commands, task form, admin commands
 │   ├── assistant-commands.ts # /forget, /memory
 │   ├── prompt.ts           # /prompt multi-step creation flow
@@ -194,11 +195,17 @@ re-runnable.
 
 ### Adding New Commands
 
-1. Create a handler function in [src/commands/index.ts](src/commands/index.ts)
+1. Add an entry to [src/commands/catalog.ts](src/commands/catalog.ts). That single
+   declaration feeds Telegram's `/` menu, the `/help` text, and the list tests
+   cross-check against what is registered.
+2. Create a handler function in [src/commands/index.ts](src/commands/index.ts)
    (or a new file under `src/commands/` for a larger feature)
-2. Register it in `registerCommands()`
-3. Add it to the help text in `helpCommand()`
+3. Register it in `registerCommands()` (or `registerAssistantCommands()`)
 4. Handlers receive a Telegraf `Context` object with user info and message data
+
+Steps 1 and 3 must both happen: a command in the catalog but not registered shows up in
+the menu and does nothing when tapped, and `tests/command-catalog.test.ts` fails if the
+two lists disagree in either direction.
 
 ### Deployment
 
