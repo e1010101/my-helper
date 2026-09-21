@@ -1,5 +1,6 @@
 import type {
   ConversationMessage,
+  DailyTokenUsage,
   Fact,
   FactTier,
   NewConversationMessage,
@@ -10,6 +11,7 @@ import type {
   TokenUsageSummary,
 } from '../types/assistant.js';
 import type { AssistantStore } from './assistant-store.js';
+import { groupUsageByDay } from './token-usage.js';
 
 /**
  * In-memory AssistantStore used by tests and as a safe fallback. State is
@@ -180,6 +182,27 @@ export class InMemoryAssistantStore implements AssistantStore {
 
   async recordTokenUsage(record: TokenUsageRecord): Promise<void> {
     this.tokenUsage.push({ ...record, createdAt: new Date().toISOString() });
+  }
+
+  async dailyTokenUsage(userId: number, days: number, timezone: string): Promise<DailyTokenUsage[]> {
+    const sinceMs = Date.now() - days * 86_400_000;
+    const rows = this.tokenUsage.filter(
+      (row) => row.userId === userId && new Date(row.createdAt).getTime() >= sinceMs
+    );
+
+    return groupUsageByDay(
+      rows.map((row) => ({
+        createdAt: row.createdAt,
+        promptTokens: row.promptTokens,
+        completionTokens: row.completionTokens,
+        totalTokens: row.totalTokens,
+        cachedTokens: row.cachedTokens,
+        systemTokens: row.systemTokens,
+        toolsTokens: row.toolsTokens,
+        messagesTokens: row.messagesTokens,
+      })),
+      timezone
+    );
   }
 
   async summariseTokenUsage(userId: number, since: Date): Promise<TokenUsageSummary> {

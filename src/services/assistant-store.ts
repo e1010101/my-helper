@@ -1,5 +1,6 @@
 import type {
   ConversationMessage,
+  DailyTokenUsage,
   Fact,
   FactTier,
   NewConversationMessage,
@@ -62,6 +63,11 @@ export interface AssistantStore {
   recordTokenUsage(record: TokenUsageRecord): Promise<void>;
   /** Aggregate over records newer than `since`. */
   summariseTokenUsage(userId: number, since: Date): Promise<TokenUsageSummary>;
+  /**
+   * Per-day aggregates for the dashboard, oldest day first, bucketed by date in
+   * the given timezone so "today" matches the user's day rather than UTC's.
+   */
+  dailyTokenUsage(userId: number, days: number, timezone: string): Promise<DailyTokenUsage[]>;
 }
 
 /** Replaceable clock so time-dependent behaviour can be tested deterministically. */

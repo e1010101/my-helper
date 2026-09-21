@@ -15,11 +15,41 @@ import { createDefaultToolRegistry } from './tools/builtin-tools.js';
 import { createAIClient } from './services/ai-provider.js';
 import { formatLocal } from './services/reminder-time.js';
 import { registerAssistantCommands } from './commands/assistant-commands.js';
+import type { AssistantStore } from './services/assistant-store.js';
+import { renderDashboard } from './utils/dashboard.js';
+import { timingSafeEqual } from 'node:crypto';
 
 let healthServiceInstance: HealthService | null = null;
 
 export function getHealthService(): HealthService | null {
   return healthServiceInstance;
+}
+
+/**
+ * Constant-time token comparison.
+ *
+ * A plain `===` leaks the token's length and matching prefix through timing.
+ * That is a thin attack surface for a single-user bot, but the safe comparison
+ * costs nothing.
+ */
+export function isAuthorised(req: IncomingMessage, expected: string): boolean {
+  const header = req.headers.authorization;
+  const bearer = typeof header === 'string' && header.startsWith('Bearer ')
+    ? header.slice('Bearer '.length).trim()
+    : undefined;
+
+  const query = (req.url || '').split('?')[1] ?? '';
+  const fromQuery = new URLSearchParams(query).get('token') ?? undefined;
+
+  const presented = bearer || fromQuery;
+  if (!presented) {
+    return false;
+  }
+
+  const a = Buffer.from(presented);
+  const b = Buffer.from(expected);
+  // timingSafeEqual throws on differing lengths, which must not become a 500.
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 /** Telegram only accepts these characters in a webhook secret token. */
@@ -54,6 +84,7 @@ export class Bot {
   private httpServer?: ReturnType<typeof createServer>;
   private assistant: AssistantService;
   private scheduler: ReminderScheduler;
+  private store: AssistantStore;
   private shutdownHandler?: (signal: NodeJS.Signals) => void;
 
   constructor() {
@@ -69,6 +100,7 @@ export class Bot {
     healthServiceInstance = this.healthService;
 
     const store = new SupabaseAssistantStore();
+    this.store = store;
     this.assistant = new AssistantService({
       store,
       registry: createDefaultToolRegistry(),
@@ -322,6 +354,11 @@ export class Bot {
         return;
       }
 
+      if (path === '/dashboard' && req.method === 'GET') {
+        await this.handleDashboardRequest(req, res);
+        return;
+      }
+
       // Webhook endpoint - delegate to Telegraf
       if (webhookCallback && path === '/webhook' && req.method === 'POST') {
         await webhookCallback(req, res);
@@ -338,6 +375,83 @@ export class Bot {
     });
 
     return server;
+  }
+
+  /**
+   * Serves the usage dashboard, behind a token.
+   *
+   * Fails closed: with no token configured the route does not exist, because
+   * this page exposes usage data on a domain that is resolvable by anyone who
+   * knows the bot's name. The token is accepted as a query parameter so it can
+   * be opened straight from a browser, or as a bearer header for scripting.
+   */
+  private async handleDashboardRequest(
+    req: IncomingMessage,
+    res: ServerResponse,
+    storeOverride?: AssistantStore
+  ): Promise<void> {
+    const expected = env.dashboardToken();
+
+    if (!expected) {
+      logger.warn('Dashboard requested but no DASHBOARD_TOKEN or WEBHOOK_SECRET is set');
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not Found');
+      return;
+    }
+
+    if (!isAuthorised(req, expected)) {
+      res.writeHead(401, { 'Content-Type': 'text/plain' });
+      res.end('Unauthorised. Append ?token=<DASHBOARD_TOKEN> to the URL.');
+      return;
+    }
+
+    try {
+      const days = this.dashboardWindowDays();
+      const userId = this.ownerChatId();
+      const timezone = env.timezone();
+
+      if (userId === null) {
+        res.writeHead(503, { 'Content-Type': 'text/plain' });
+        res.end('ADMIN_USER_ID is not configured, so there is no usage to show.');
+        return;
+      }
+
+      const since = new Date(Date.now() - days * 86_400_000);
+      const store = storeOverride ?? this.store;
+      const [summary, daily] = await Promise.all([
+        store.summariseTokenUsage(userId, since),
+        store.dailyTokenUsage(userId, days, timezone),
+      ]);
+
+      const html = renderDashboard({
+        summary,
+        daily,
+        windowDays: days,
+        timezone,
+        generatedAt: new Date(),
+      });
+
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        // Usage data should not sit in a shared cache or a browser history.
+        'Cache-Control': 'no-store',
+        'Referrer-Policy': 'no-referrer',
+      });
+      res.end(html);
+    } catch (error) {
+      logger.error('Dashboard render failed', error);
+      res.writeHead(500, { 'Content-Type': 'text/plain' });
+      res.end('Failed to build the dashboard.');
+    }
+  }
+
+  /** Window for the dashboard, clamped so a bad query cannot ask for everything. */
+  private dashboardWindowDays(): number {
+    const parsed = Number.parseInt(process.env.DASHBOARD_DAYS || '30', 10);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      return 30;
+    }
+    return Math.min(parsed, 365);
   }
 
   private listen(server: ReturnType<typeof createServer>, port: number, label: string): Promise<void> {

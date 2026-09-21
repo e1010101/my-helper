@@ -217,6 +217,18 @@ export const env = {
     return resolvePort(process.env.PORT, process.env.WEBHOOK_PORT);
   },
 
+  /**
+   * Token that unlocks the usage dashboard.
+   *
+   * Falls back to WEBHOOK_SECRET so a deployment that already has one does not
+   * need a second secret. Returns undefined when neither is set, which disables
+   * the route entirely — failing closed is the only safe default, since the
+   * dashboard would otherwise expose usage data on a public domain.
+   */
+  dashboardToken(): string | undefined {
+    return process.env.DASHBOARD_TOKEN?.trim() || process.env.WEBHOOK_SECRET?.trim() || undefined;
+  },
+
   timezone(): string {
     return resolveTimezone();
   },

@@ -107,3 +107,24 @@ export interface TokenUsageSummary {
   firstRecordedAt: string | null;
   lastRecordedAt: string | null;
 }
+
+/**
+ * One day of usage, for the dashboard.
+ *
+ * The component shares are averaged per day: a daily total would hide that the
+ * tool schemas are the fixed cost, which is the distinction worth seeing.
+ */
+export interface DailyTokenUsage {
+  /** Local date, "YYYY-MM-DD". */
+  date: string;
+  calls: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cachedTokens: number;
+  averagePromptTokens: number;
+  /** Mean share of the prompt, per call, rounded. */
+  averageSystemTokens: number;
+  averageToolsTokens: number;
+  averageMessagesTokens: number;
+}

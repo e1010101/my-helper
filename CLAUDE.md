@@ -85,7 +85,8 @@ src/
 │   ├── telegram-format.ts  # HTML escaping + Markdown→Telegram HTML
 │   ├── telegram-chunk.ts   # Splits messages to Telegram's 4096-char limit
 │   ├── memory-format.ts    # Renders /memory, including fact staleness
-│   └── weather-format.ts   # WMO codes and reports to readable text
+│   ├── weather-format.ts   # WMO codes and reports to readable text
+│   └── dashboard.ts        # Server-rendered usage dashboard (no framework)
 ├── bot.ts                  # Bot initialization, middleware, HTTP server, wiring
 └── index.ts                # Application entry point
 ```
@@ -98,11 +99,13 @@ src/
 - Wires the assistant: `SupabaseAssistantStore` → `AssistantService` (with the default
   tool registry and the configured `AIClient`) → `ReminderScheduler`
 - Routes non-command text to the assistant (skipped while a `/prompt` draft is active)
-- Serves `/health` (liveness), `/ready` (readiness, including a database write probe)
-  and `/` plus `/webhook` from one HTTP server in both modes. Keep the two health
-  endpoints distinct: a database outage must not fail Railway's healthcheck, because
-  restarting cannot repair a database and a crash loop would take the bot down
-  entirely instead of degrading.
+- Serves `/health` (liveness), `/ready` (readiness, including a database write probe),
+  `/dashboard` (usage, token-gated) and `/` plus `/webhook` from one HTTP server in both
+  modes. Keep the two health endpoints distinct: a database outage must not fail
+  Railway's healthcheck, because restarting cannot repair a database and a crash loop
+  would take the bot down entirely instead of degrading. The dashboard fails closed —
+  with no `DASHBOARD_TOKEN` or `WEBHOOK_SECRET` set the route does not exist, since it
+  would otherwise expose usage data on a publicly resolvable domain.
 - Binds explicitly to `0.0.0.0` and prefers the platform-injected `PORT`
 - Starts the reminder scheduler only when `ADMIN_USER_ID` gives it a destination
 - Handles graceful shutdown on SIGINT/SIGTERM (scheduler, then HTTP server, then bot)
@@ -172,11 +175,11 @@ static strings with no interpolation.
 
 Required Supabase tables (full DDL in [docs/database-schema.sql](docs/database-schema.sql)):
 `user_data`, `command_history`, `tasks`, `prompts`, `conversations`, `facts`,
-`reminders`, `pending_actions`, `credentials`, `health_probes`. The health check queries
-all of them, so a missing table makes `/health` report `unhealthy`.
+`reminders`, `pending_actions`, `credentials`, `health_probes`, `token_usage`. The health
+check queries all of them, so a missing table makes `/health` report `unhealthy`.
 
-`conversations`, `facts`, `reminders`, `pending_actions`, `credentials` and
-`health_probes` have Row Level Security enabled with only a `service_role` policy. **The
+`conversations`, `facts`, `reminders`, `pending_actions`, `credentials`, `health_probes`
+and `token_usage` have Row Level Security enabled with only a `service_role` policy. **The
 bot must run with `SUPABASE_SERVICE_ROLE_KEY`**; never ship that key to a client.
 
 Two important consequences:

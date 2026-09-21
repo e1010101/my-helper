@@ -12,6 +12,7 @@
  * means the ratios between them are meaningful even though the absolute numbers
  * are approximate.
  */
+import type { DailyTokenUsage } from '../types/assistant.js';
 
 /** Rough characters-per-token. English prose sits near 4; JSON sits nearer 3. */
 const CHARS_PER_TOKEN = 3.8;
@@ -130,6 +131,77 @@ export function estimateTokens(text: string): number {
 /** Estimated tokens for a raw character count. */
 function estimateFromChars(chars: number): number {
   return Math.ceil(chars / CHARS_PER_TOKEN);
+}
+
+/** A token_usage row, in the shape both stores can produce. */
+export interface UsageRow {
+  createdAt: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cachedTokens: number;
+  systemTokens: number;
+  toolsTokens: number;
+  messagesTokens: number;
+}
+
+/** Local calendar date for an instant, as "YYYY-MM-DD". */
+export function localDateKey(date: Date, timezone: string): string {
+  // en-CA formats as YYYY-MM-DD, which sorts and groups correctly as a string.
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date);
+}
+
+/**
+ * Buckets usage rows into per-day aggregates, oldest day first.
+ *
+ * Kept here rather than in either store so the in-memory and Postgres paths
+ * cannot disagree about what a "day" is — bucketing by UTC date would put the
+ * user's evening in the wrong day for most timezones.
+ */
+export function groupUsageByDay(rows: UsageRow[], timezone: string): DailyTokenUsage[] {
+  const buckets = new Map<string, UsageRow[]>();
+
+  for (const row of rows) {
+    const parsed = new Date(row.createdAt);
+    if (Number.isNaN(parsed.getTime())) {
+      continue;
+    }
+    const key = localDateKey(parsed, timezone);
+    const bucket = buckets.get(key);
+    if (bucket) {
+      bucket.push(row);
+    } else {
+      buckets.set(key, [row]);
+    }
+  }
+
+  return [...buckets.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, dayRows]) => {
+      const sum = (pick: (row: UsageRow) => number) =>
+        dayRows.reduce((total, row) => total + (pick(row) ?? 0), 0);
+
+      const calls = dayRows.length;
+      const mean = (pick: (row: UsageRow) => number) => Math.round(sum(pick) / calls);
+
+      return {
+        date,
+        calls,
+        promptTokens: sum((row) => row.promptTokens),
+        completionTokens: sum((row) => row.completionTokens),
+        totalTokens: sum((row) => row.totalTokens),
+        cachedTokens: sum((row) => row.cachedTokens),
+        averagePromptTokens: mean((row) => row.promptTokens),
+        averageSystemTokens: mean((row) => row.systemTokens),
+        averageToolsTokens: mean((row) => row.toolsTokens),
+        averageMessagesTokens: mean((row) => row.messagesTokens),
+      };
+    });
 }
 
 /**

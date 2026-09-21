@@ -142,6 +142,29 @@ costs one API call.
 Two tool declarations is not free: they add roughly **257 prompt tokens to every
 request**, which is why the tool set is kept deliberately small.
 
+## 📊 Usage dashboard
+
+Token usage is recorded per model call, and there is a page for it:
+
+```
+https://your-app.up.railway.app/dashboard?token=<DASHBOARD_TOKEN>
+```
+
+It shows model calls, total tokens, **average prompt size**, and the cache share, plus a
+per-day table splitting the average prompt into system / tools / messages. That split is
+the useful part: it distinguishes "memory is growing" from "the tool schemas are simply
+expensive" — measured, the tools were the dominant fixed cost, not memory.
+
+The average prompt line is the one to watch over months.
+
+Set `DASHBOARD_TOKEN` (or reuse `WEBHOOK_SECRET`) to unlock it. **With neither set the
+route does not exist** — it returns 404 to everyone. That is deliberate: the page shows
+your data on a domain anyone who knows the bot's name can resolve, so it fails closed
+rather than defaulting to open. It also accepts `Authorization: Bearer <token>` for
+scripting, sends `Cache-Control: no-store`, and asks not to be indexed.
+
+`DASHBOARD_DAYS` changes the window (default 30, maximum 365).
+
 ### Model providers
 
 The assistant speaks to whichever provider you configure:

@@ -1,8 +1,10 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { db } from './database.js';
+import { groupUsageByDay } from './token-usage.js';
 import type { AssistantStore } from './assistant-store.js';
 import type {
   ConversationMessage,
+  DailyTokenUsage,
   Fact,
   FactTier,
   NewConversationMessage,
@@ -497,5 +499,51 @@ export class SupabaseAssistantStore implements AssistantStore {
       firstRecordedAt: rows[0].created_at,
       lastRecordedAt: rows[rows.length - 1].created_at,
     };
+  }
+
+  /**
+   * Per-day aggregates. The window is bounded by `days` and MAX_USAGE_ROWS, so
+   * this stays cheap as history grows; bucketing happens in groupUsageByDay so
+   * the same "day" definition is used here and by the in-memory store.
+   */
+  async dailyTokenUsage(userId: number, days: number, timezone: string): Promise<DailyTokenUsage[]> {
+    const since = new Date(Date.now() - days * 86_400_000);
+
+    const { data, error } = await this.client
+      .from('token_usage')
+      .select('prompt_tokens, completion_tokens, total_tokens, cached_tokens, system_tokens, tools_tokens, messages_tokens, created_at')
+      .eq('user_id', userId)
+      .gte('created_at', since.toISOString())
+      .order('created_at', { ascending: true })
+      .limit(MAX_USAGE_ROWS);
+
+    if (error) {
+      throw new Error(`Failed to load daily token usage: ${error.message}`);
+    }
+
+    const rows = (data ?? []) as {
+      prompt_tokens: number;
+      completion_tokens: number;
+      total_tokens: number;
+      cached_tokens: number;
+      system_tokens: number;
+      tools_tokens: number;
+      messages_tokens: number;
+      created_at: string;
+    }[];
+
+    return groupUsageByDay(
+      rows.map((row) => ({
+        createdAt: row.created_at,
+        promptTokens: row.prompt_tokens,
+        completionTokens: row.completion_tokens,
+        totalTokens: row.total_tokens,
+        cachedTokens: row.cached_tokens,
+        systemTokens: row.system_tokens,
+        toolsTokens: row.tools_tokens,
+        messagesTokens: row.messages_tokens,
+      })),
+      timezone
+    );
   }
 }
