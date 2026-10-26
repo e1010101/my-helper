@@ -221,7 +221,7 @@ export class DeepSeekProvider implements AIClient {
       }
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error(`DeepSeek request timed out after ${this.timeoutMs}ms`);
+        throw new Error(`DeepSeek request timed out after ${this.timeoutMs}ms`, { cause: error });
       }
       throw error;
     } finally {

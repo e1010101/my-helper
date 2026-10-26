@@ -283,3 +283,73 @@ test('reminder times are timezone-correct end to end', async () => {
   await onTime.tick();
   assert.equal(delivered, 1);
 });
+
+test('delivery of an old one-off occurrence cannot deactivate a newly recurring schedule', async () => {
+  const store = new InMemoryAssistantStore();
+  const reminder = await store.createReminder({ userId: 1, text: 'Old', frequency: 'once', nextRunAt: '2026-03-10T01:00:00Z' });
+  const scheduler = new ReminderScheduler({
+    store, timezone: SINGAPORE, clock: fixedClock('2026-03-10T01:00:00Z'),
+    deliver: async () => {
+      await store.updateReminder(reminder.id, 1, {
+        text: 'New recurring reminder',
+        schedule: { frequency: 'daily', timeOfDay: '21:00', nextRunAt: '2026-03-10T13:00:00Z' },
+      });
+    },
+  });
+  await scheduler.tick();
+  const saved = await store.getReminder(reminder.id, 1);
+  assert.equal(saved?.active, true);
+  assert.equal(saved?.frequency, 'daily');
+  assert.equal(saved?.nextRunAt, '2026-03-10T13:00:00Z');
+});
+
+test('recurring delivery cannot overwrite a concurrent schedule edit', async () => {
+  const store = new InMemoryAssistantStore();
+  const reminder = await store.createReminder({
+    userId: 1, text: 'Daily', frequency: 'daily', timeOfDay: '09:00', nextRunAt: '2026-03-10T01:00:00Z',
+  });
+  const scheduler = new ReminderScheduler({
+    store, timezone: SINGAPORE, clock: fixedClock('2026-03-10T01:00:00Z'),
+    deliver: async () => {
+      await store.updateReminder(reminder.id, 1, {
+        text: 'Evening', schedule: { frequency: 'daily', timeOfDay: '21:00', nextRunAt: '2026-03-10T13:00:00Z' },
+      });
+    },
+  });
+  await scheduler.tick();
+  const saved = await store.getReminder(reminder.id, 1);
+  assert.equal(saved?.timeOfDay, '21:00');
+  assert.equal(saved?.nextRunAt, '2026-03-10T13:00:00Z');
+});
+
+test('a text-only edit during delivery retains both new text and advanced delivery state', async () => {
+  const store = new InMemoryAssistantStore();
+  const reminder = await store.createReminder({
+    userId: 1, text: 'Daily', frequency: 'daily', timeOfDay: '09:00', nextRunAt: '2026-03-10T01:00:00Z',
+  });
+  const scheduler = new ReminderScheduler({
+    store, timezone: SINGAPORE, clock: fixedClock('2026-03-10T01:00:00Z'),
+    deliver: async () => { await store.updateReminder(reminder.id, 1, { text: 'Changed text' }); },
+  });
+  await scheduler.tick();
+  const saved = await store.getReminder(reminder.id, 1);
+  assert.equal(saved?.text, 'Changed text');
+  assert.equal(saved?.nextRunAt, '2026-03-11T01:00:00.000Z');
+  assert.equal(saved?.lastSentAt, '2026-03-10T01:00:00.000Z');
+});
+
+test('cancelling during delivery does not let the stale occurrence alter the cancelled row', async () => {
+  const store = new InMemoryAssistantStore();
+  const reminder = await store.createReminder({
+    userId: 1, text: 'Daily', frequency: 'daily', timeOfDay: '09:00', nextRunAt: '2026-03-10T01:00:00Z',
+  });
+  const scheduler = new ReminderScheduler({
+    store, timezone: SINGAPORE, clock: fixedClock('2026-03-10T01:00:00Z'),
+    deliver: async () => { await store.cancelReminder(reminder.id, 1); },
+  });
+  await scheduler.tick();
+  const [saved] = await store.listReminders(1, true);
+  assert.equal(saved.active, false);
+  assert.equal(saved.nextRunAt, '2026-03-10T01:00:00Z');
+  assert.equal(saved.lastSentAt, null);
+});

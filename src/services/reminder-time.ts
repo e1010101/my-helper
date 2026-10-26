@@ -100,7 +100,8 @@ function offsetMinutes(date: Date, timezone: string): number {
 
 /**
  * Converts a wall-clock time in `timezone` to a UTC instant.
- * DST gaps resolve forward, which is the behaviour users expect from an alarm.
+ * DST gaps shift forward by the size of the gap. Repeated times at a fall-back
+ * transition resolve to the earlier instant, so a daily alarm fires only once.
  */
 export function instantFromWallClock(
   year: number,
@@ -111,10 +112,28 @@ export function instantFromWallClock(
   timezone: string
 ): Date {
   const guess = Date.UTC(year, month - 1, day, hour, minute);
-  let candidate = guess - offsetMinutes(new Date(guess), timezone) * 60000;
-  // One correction pass handles DST boundaries.
-  candidate = guess - offsetMinutes(new Date(candidate), timezone) * 60000;
-  return new Date(candidate);
+  // Collect offsets on both sides of a nearby transition. Iterating an offset
+  // correction can oscillate when the requested wall time does not exist.
+  // The wider window also covers half-hour gaps and skipped calendar dates.
+  const offsets = new Set(
+    [-48, -24, 0, 24, 48].map((hours) => offsetMinutes(new Date(guess + hours * 3_600_000), timezone))
+  );
+  const candidates = [...offsets].map((offset) => {
+    const instant = new Date(guess - offset * 60_000);
+    const parts = getLocalParts(instant, timezone);
+    const wallTime = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute);
+    return { instant, displacement: wallTime - guess };
+  });
+
+  const exact = candidates.filter((candidate) => candidate.displacement === 0)
+    .sort((a, b) => a.instant.getTime() - b.instant.getTime());
+  if (exact.length > 0) return exact[0].instant;
+
+  // During a gap, using the pre-transition offset lands the alarm forward by
+  // exactly the missing interval (02:30 -> 03:30 for a one-hour spring gap).
+  const forward = candidates.filter((candidate) => candidate.displacement > 0)
+    .sort((a, b) => a.displacement - b.displacement || a.instant.getTime() - b.instant.getTime());
+  return forward[0]?.instant ?? new Date(NaN);
 }
 
 /** Parses "HH:MM", returning null when malformed. */
@@ -257,21 +276,10 @@ export function parseNaturalTime(
     }
 
     if (recurring[1] === 'weekday') {
-      // Weekdays are modelled as the next Monday at that time plus a weekly
-      // rule; the scheduler only supports one weekday per reminder, so anchor
-      // on Monday and let the user refine.
-      return {
-        date: nextOccurrence(
-          { timeOfDay: formatTimeOfDay(target.hour, target.minute), dayOfWeek: 1 },
-          now,
-          timezone
-        ) ?? now,
-        recurrence: {
-          frequency: 'weekly',
-          timeOfDay: formatTimeOfDay(target.hour, target.minute),
-          dayOfWeek: 1,
-        },
-      };
+      // One reminder currently supports only a single weekday. Refuse the
+      // unsupported cadence so the caller asks for clarification, rather than
+      // silently dropping four of the five requested days.
+      return null;
     }
 
     const weekday = WEEKDAY_LOOKUP[recurring[1]];
@@ -379,9 +387,24 @@ export function parseNaturalTime(
     return { date: candidate };
   }
 
-  const iso = new Date(input.trim());
-  if (!Number.isNaN(iso.getTime()) && /\d{4}-\d{2}-\d{2}/.test(input)) {
-    return { date: iso };
+  const iso = /^(\d{4})-(\d{2})-(\d{2})(?:[Tt ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?([Zz]|[+-]\d{2}:\d{2})?)?$/.exec(input.trim());
+  if (iso) {
+    const [, yearText, monthText, dayText, hourText, minuteText, secondText, fraction, offset] = iso;
+    const [year, month, day, hour, minute, second] = [
+      yearText, monthText, dayText, hourText ?? '0', minuteText ?? '0', secondText ?? '0',
+    ].map(Number);
+    // Date parsing otherwise normalises impossible dates, e.g. February 30.
+    if (year < 100 || month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month)
+      || hour > 23 || minute > 59 || second > 59) return null;
+
+    const milliseconds = Number((fraction ?? '').padEnd(3, '0'));
+    if (!offset) {
+      const local = instantFromWallClock(year, month, day, hour, minute, timezone);
+      return { date: new Date(local.getTime() + second * 1000 + milliseconds) };
+    }
+
+    const absolute = new Date(input.trim());
+    if (!Number.isNaN(absolute.getTime())) return { date: absolute };
   }
 
   return null;

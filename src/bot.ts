@@ -172,7 +172,10 @@ export class Bot {
   }
 
   private setupCommands() {
-    registerCommands(this.bot);
+    registerCommands(this.bot, {
+      getStore: () => this.assistant.getStore(),
+      timezone: env.timezone(),
+    });
     registerAssistantCommands(this.bot, this.assistant, env.timezone());
   }
 
@@ -219,7 +222,7 @@ export class Bot {
         );
       } else if (userId) {
         // While a form is open, the message belongs to the form, not the model.
-        if (isUserInPromptFlow(userId)) {
+        if (isUserInPromptFlow(userId, ctx.chat?.id)) {
           logger.info(`Skipping AI response because user ${userId} is in prompt flow`);
           await next();
           return;
@@ -320,17 +323,15 @@ export class Bot {
    * Liveness/readiness endpoints, deliberately separate.
    *
    * `/health` answers "should the platform keep this process running": the
-   * Telegram connection is the only thing a restart can actually fix. A
-   * database outage is reported in the body but does not fail the check,
-   * because restarting cannot repair it and a crash loop would take the bot
-   * down entirely — losing messages and reminders instead of degrading.
+   * Telegram probe is bounded, and this path does not query the database.
+   * Database stalls therefore cannot delay or fail platform liveness.
    *
    * `/ready` answers "can the assistant work right now", including the database
    * write probe, and is the one for external monitors.
    */
   private async handleHealthRequest(res: ServerResponse, path: string): Promise<void> {
     try {
-      const health = await this.healthService.getHealthStatus();
+      const health = await this.healthService.getHealthStatus({ checkDatabase: path === '/ready' });
 
       const healthy = path === '/ready'
         ? health.status === 'healthy'
@@ -472,9 +473,9 @@ export class Bot {
       // Webhook mode (for production)
       const { domain, port, secretToken } = env.webhook()!;
 
-      if (secretToken && !WEBHOOK_SECRET_PATTERN.test(secretToken)) {
-        logger.warn(
-          'WEBHOOK_SECRET is ignored: Telegram only allows A-Z, a-z, 0-9, "_" and "-" (max 256 chars)'
+      if (!secretToken || !WEBHOOK_SECRET_PATTERN.test(secretToken)) {
+        throw new Error(
+          'WEBHOOK_SECRET is required in webhook mode: use 1-256 characters from A-Z, a-z, 0-9, "_" and "-"'
         );
       }
 
@@ -488,14 +489,14 @@ export class Bot {
       // lets every request through, so anyone who learned the URL could POST
       // forged updates and drive the assistant.
       const webhookCallback = this.bot.webhookCallback('/webhook', {
-        ...(secretToken ? { secretToken } : {}),
+        secretToken,
       }) as WebhookCallback;
 
       // Register the URL with Telegram. Retried on rate limiting, which is the
       // only realistic failure here beyond an invalid token.
       await this.retryOnRateLimit(() =>
         this.bot.telegram.setWebhook(webhookUrl, {
-          ...(secretToken ? { secret_token: secretToken } : {}),
+          secret_token: secretToken,
         })
       );
 

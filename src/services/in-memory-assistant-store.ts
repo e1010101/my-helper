@@ -7,6 +7,7 @@ import type {
   NewReminder,
   PendingActionRecord,
   Reminder,
+  ReminderUpdate,
   TokenUsageRecord,
   TokenUsageSummary,
 } from '../types/assistant.js';
@@ -117,23 +118,52 @@ export class InMemoryAssistantStore implements AssistantStore {
   }
 
   async listDueReminders(now: Date, limit = 50): Promise<Reminder[]> {
-    return this.reminders
+    return structuredClone(this.reminders
       .filter((reminder) => reminder.active && new Date(reminder.nextRunAt) <= now)
       .sort((a, b) => a.nextRunAt.localeCompare(b.nextRunAt))
-      .slice(0, limit);
+      .slice(0, limit));
   }
 
-  async markReminderSent(id: number, nextRunAt: string, sentAt: string): Promise<void> {
+  async getReminder(id: number, userId: number): Promise<Reminder | null> {
+    return this.reminders.find((reminder) => reminder.id === id && reminder.userId === userId && reminder.active) ?? null;
+  }
+
+  async updateReminder(id: number, userId: number, update: ReminderUpdate): Promise<Reminder | null> {
+    const reminder = await this.getReminder(id, userId);
+    if (!reminder) return null;
+    reminder.text = update.text;
+    if (update.schedule) {
+      Object.assign(reminder, update.schedule, {
+        timeOfDay: update.schedule.timeOfDay ?? null,
+        dayOfWeek: update.schedule.dayOfWeek ?? null,
+        dayOfMonth: update.schedule.dayOfMonth ?? null,
+      });
+    }
+    return reminder;
+  }
+
+  private occurrenceMatches(reminder: Reminder, expected: Reminder): boolean {
+    return reminder.active && (
+      reminder.userId === expected.userId
+      && new Date(reminder.nextRunAt).getTime() === new Date(expected.nextRunAt).getTime()
+      && reminder.frequency === expected.frequency
+      && reminder.timeOfDay === expected.timeOfDay
+      && reminder.dayOfWeek === expected.dayOfWeek
+      && reminder.dayOfMonth === expected.dayOfMonth
+    );
+  }
+
+  async markReminderSent(id: number, nextRunAt: string, sentAt: string, expected: Reminder): Promise<void> {
     const reminder = this.reminders.find((candidate) => candidate.id === id);
-    if (reminder) {
+    if (reminder && this.occurrenceMatches(reminder, expected)) {
       reminder.nextRunAt = nextRunAt;
       reminder.lastSentAt = sentAt;
     }
   }
 
-  async completeReminder(id: number, sentAt: string): Promise<void> {
+  async completeReminder(id: number, sentAt: string, expected: Reminder): Promise<void> {
     const reminder = this.reminders.find((candidate) => candidate.id === id);
-    if (reminder) {
+    if (reminder && this.occurrenceMatches(reminder, expected)) {
       reminder.active = false;
       reminder.lastSentAt = sentAt;
     }
@@ -166,6 +196,13 @@ export class InMemoryAssistantStore implements AssistantStore {
     return (
       this.pendingActions.find((action) => action.id === id && action.userId === userId) ?? null
     );
+  }
+
+  async consumePendingAction(id: number, userId: number): Promise<PendingActionRecord | null> {
+    // No await between lookup/removal: mirrors a single DELETE RETURNING.
+    const index = this.pendingActions.findIndex((action) => action.id === id && action.userId === userId);
+    if (index === -1) return null;
+    return this.pendingActions.splice(index, 1)[0];
   }
 
   async deletePendingAction(id: number): Promise<void> {

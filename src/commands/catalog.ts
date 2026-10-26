@@ -42,7 +42,7 @@ export const COMMANDS: CommandDefinition[] = [
       '  -delete <id> : Delete a task',
     ],
   },
-  { name: 'tasks', description: 'List your todos' },
+  { name: 'tasks', description: 'List todos and active reminders' },
   { name: 'prompt', description: 'Save a prompt template' },
   {
     name: 'getprompt',

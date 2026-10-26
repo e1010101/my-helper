@@ -10,7 +10,7 @@
     "start": "node dist/index.js",
     "lint": "eslint src scripts tests --ext .ts",
     "type-check": "tsc -p tsconfig.check.json",
-    "test": "node --import tsx --test tests/*.test.ts",
+    "test": "node --import tsx --import ./tests/helpers/no-network.ts --test tests/*.test.ts",
     "webhook:info": "tsx scripts/webhook-manager.ts info",
     "webhook:delete": "tsx scripts/webhook-manager.ts delete",
     "webhook:set": "tsx scripts/webhook-manager.ts set",
@@ -32,15 +32,16 @@
     "telegraf": "^4.16.3"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.12",
+    "@eslint/js": "^10.0.1",
     "@types/node": "^20.11.16",
-    "@typescript-eslint/eslint-plugin": "^6.20.0",
-    "@typescript-eslint/parser": "^6.20.0",
-    "eslint": "^8.56.0",
-    "node-notifier": "^10.0.1",
-    "tsx": "^4.7.1",
+    "@typescript-eslint/eslint-plugin": "^8.72.1",
+    "@typescript-eslint/parser": "^8.72.1",
+    "eslint": "^10.13.0",
+    "tsx": "^4.23.15",
     "typescript": "^5.3.3"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": "^22.13.0 || >=24.0.0"
   }
 }

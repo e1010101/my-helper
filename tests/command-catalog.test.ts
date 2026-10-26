@@ -51,7 +51,7 @@ function registeredNames(): Set<string> {
     on: () => undefined,
   };
 
-  registerCommands(fakeBot as never);
+  registerCommands(fakeBot as never, { getStore: () => assistant.getStore(), timezone: 'UTC' });
   registerAssistantCommands(fakeBot as never, assistant, 'UTC');
   return names;
 }

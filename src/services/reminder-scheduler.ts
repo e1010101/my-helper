@@ -14,8 +14,8 @@ export interface ReminderDelivery {
 export interface ReminderSchedulerOptions {
   store: {
     listDueReminders(now: Date, limit?: number): Promise<Reminder[]>;
-    markReminderSent(id: number, nextRunAt: string, sentAt: string): Promise<void>;
-    completeReminder(id: number, sentAt: string): Promise<void>;
+    markReminderSent(id: number, nextRunAt: string, sentAt: string, expected: Reminder): Promise<void>;
+    completeReminder(id: number, sentAt: string, expected: Reminder): Promise<void>;
   };
   /** How a due reminder reaches the user. Typically Telegram sendMessage. */
   deliver: (delivery: ReminderDelivery) => Promise<void>;
@@ -138,6 +138,9 @@ export class ReminderScheduler {
   }
 
   private async deliverOnce(reminder: Reminder, now: Date): Promise<void> {
+    // Delivery awaits external I/O; retain the exact occurrence it started
+    // with so a newer schedule cannot be completed or overwritten afterwards.
+    const expected = structuredClone(reminder);
     const dueAt = new Date(reminder.nextRunAt);
     const late = now.getTime() - dueAt.getTime() > this.latenessThresholdMs;
 
@@ -147,7 +150,7 @@ export class ReminderScheduler {
     const sentAtIso = now.toISOString();
 
     if (reminder.frequency === 'once') {
-      await this.store.completeReminder(reminder.id, sentAtIso);
+      await this.store.completeReminder(reminder.id, sentAtIso, expected);
       return;
     }
 
@@ -166,11 +169,11 @@ export class ReminderScheduler {
         `Reminder ${reminder.id} has no future occurrence and was deactivated`,
         { frequency: reminder.frequency, timeOfDay: reminder.timeOfDay }
       );
-      await this.store.completeReminder(reminder.id, sentAtIso);
+      await this.store.completeReminder(reminder.id, sentAtIso, expected);
       return;
     }
 
-    await this.store.markReminderSent(reminder.id, follow.toISOString(), sentAtIso);
+    await this.store.markReminderSent(reminder.id, follow.toISOString(), sentAtIso, expected);
   }
 
   /** Number of scheduled reminders waiting to be delivered prematurely. */

@@ -2,6 +2,12 @@
 
 Follow these steps to deploy your bot for 24/7 operation with monitoring.
 
+For an existing deployment, apply the updated `docs/database-schema.sql` with
+`npm run db:migrate` before deploying the new code. It adds
+`pending_actions.requested_at` and locks down all private tables while preserving
+their rows. Use Node.js 22.13+ (22.x) or 24+, keep `SUPABASE_SERVICE_ROLE_KEY` set,
+and configure a valid `WEBHOOK_SECRET` whenever webhook mode is enabled.
+
 ## Prerequisites
 
 - [ ] Bot token from @BotFather

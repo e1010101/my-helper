@@ -202,7 +202,7 @@ const REQUIRED_TABLES = [
   'token_usage',
 ];
 
-const RLS_TABLES = ['conversations', 'facts', 'reminders', 'pending_actions', 'credentials', 'health_probes', 'token_usage'];
+const RLS_TABLES = REQUIRED_TABLES;
 
 const verifySql = `
 SELECT json_agg(row_to_json(t) ORDER BY t.table_name)
@@ -241,6 +241,7 @@ try {
 
 const byName = new Map(tables.map((table) => [table.table_name, table]));
 const missing = REQUIRED_TABLES.filter((name) => !byName.has(name));
+const unprotected = RLS_TABLES.filter((name) => byName.has(name) && !byName.get(name)?.rls_enabled);
 
 console.log('\n📋 Table status');
 for (const name of REQUIRED_TABLES) {
@@ -260,6 +261,11 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
+if (unprotected.length > 0) {
+  console.log(`\n❌ Row Level Security is disabled on: ${unprotected.join(', ')}`);
+  process.exit(1);
+}
+
 console.log('\n✅ All required tables exist.');
 console.log('\nNext: set SUPABASE_SERVICE_ROLE_KEY (Project Settings -> API) so the bot');
-console.log('can read the RLS-protected tables, then start the bot and check /health.');
+console.log('can read the RLS-protected tables, then start the bot and check /ready.');

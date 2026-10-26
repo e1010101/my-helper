@@ -68,6 +68,7 @@ ApiClient.default.prototype.callApi = async function (method: string, payload: u
 };
 
 const { Bot } = await import('../src/bot.js');
+const { db } = await import('../src/services/database.js');
 
 interface AssistantInternals {
   store: unknown;
@@ -180,8 +181,9 @@ test('an unknown command is reported and never reaches the model', async () => {
 
 test('a plain message answers even when storage is unavailable', async () => {
   apiCalls.length = 0;
+  scriptText('Hello, even without memory.');
   await sendText('hello there');
-  assert.match(lastMessage(), /having trouble/i);
+  assert.match(lastMessage(), /Hello, even without memory/);
 });
 
 test('a write request produces Confirm/Cancel buttons and writes nothing', async () => {
@@ -346,7 +348,7 @@ test('/health and /ready answer different questions', async () => {
   const target = new Bot();
   const healthService = (target as unknown as {
     healthService: {
-      getHealthStatus(): Promise<Record<string, unknown>>;
+      getHealthStatus(options?: { checkDatabase?: boolean }): Promise<Record<string, unknown>>;
     };
   }).healthService;
 
@@ -365,11 +367,15 @@ test('/health and /ready answer different questions', async () => {
 
   try {
     // Telegram reachable, database broken.
-    healthService.getHealthStatus = async () => ({
+    const probes: boolean[] = [];
+    healthService.getHealthStatus = async (options) => {
+      probes.push(options?.checkDatabase !== false);
+      return {
       status: 'unhealthy',
       bot: { connected: true, mode: 'webhook' },
       database: { connected: false, error: 'cannot write to the assistant tables' },
-    });
+      };
+    };
 
     const healthDown = await status('/health');
     assert.equal(healthDown.code, 200, 'liveness must pass while the bot can still serve');
@@ -378,6 +384,7 @@ test('/health and /ready answer different questions', async () => {
     const readyDown = await status('/ready');
     assert.equal(readyDown.code, 503, 'readiness must fail while the database is unusable');
     assert.equal(readyDown.body.check, 'ready');
+    assert.deepEqual(probes, [false, true], 'only readiness may start database work');
 
     // Both healthy.
     healthService.getHealthStatus = async () => ({
@@ -473,4 +480,105 @@ test('polling mode starts the reminder scheduler even though launch() never reso
 
   pollingBot.dispose();
   await pollingBot.stop('test');
+});
+
+test('/tasks lists scheduled reminders alongside todos through the real bot', async (t) => {
+  const internals = assistant as unknown as AssistantInternals;
+  const previousStore = internals.store;
+  t.after(() => { internals.store = previousStore; });
+
+  const store = new InMemoryAssistantStore();
+  internals.store = store;
+  t.mock.method(db, 'getTasksByUser', async (userId: number, limit: number) => {
+    assert.equal(userId, 4242);
+    assert.equal(limit, 20);
+    return [];
+  });
+  const daily = await store.createReminder({
+    userId: 4242,
+    text: 'Daily <report> & review',
+    frequency: 'daily',
+    timeOfDay: '22:00',
+    nextRunAt: '2026-10-05T14:00:00.000Z',
+  });
+  const cancelled = await store.createReminder({
+    userId: 4242, text: 'Cancelled schedule', frequency: 'weekly',
+    nextRunAt: '2026-10-06T14:00:00.000Z',
+  });
+  await store.cancelReminder(cancelled.id, 4242);
+  await store.createReminder({
+    userId: 9999, text: 'Another user schedule', frequency: 'daily',
+    nextRunAt: '2026-10-05T14:00:00.000Z',
+  });
+
+  await t.test('cron-only users see their active schedule and local next run', async () => {
+    apiCalls.length = 0;
+    await sendText('/tasks');
+    assert.match(allMessages(), /Active reminders \(1\)/);
+    assert.match(allMessages(), /Daily &lt;report&gt; &amp; review/);
+    assert.match(allMessages(), /\(daily\)/);
+    assert.match(allMessages(), /Asia\/Singapore/);
+    assert.match(allMessages(), /22:00/);
+    assert.doesNotMatch(allMessages(), /You have no|Cancelled schedule|Another user schedule/);
+    assert.deepEqual(await store.listReminders(4242), [daily], 'listing does not modify the schedule');
+  });
+
+  await t.test('/task -read all uses the same schedule-aware list', async () => {
+    apiCalls.length = 0;
+    await sendText('/task -read all');
+    assert.match(allMessages(), /Active reminders \(1\)/);
+    assert.match(allMessages(), /Daily &lt;report&gt;/);
+  });
+
+  await t.test('todos retain their completion buttons beside reminders', async (subtest) => {
+    subtest.mock.method(db, 'getTasksByUser', async () => [{
+      id: 42, user_id: 4242, name: 'Buy milk', description: 'Groceries',
+      completed: false, created_at: '2026-10-04T14:00:00.000Z',
+    }]);
+    apiCalls.length = 0;
+    await sendText('/tasks');
+    assert.match(allMessages(), /Buy milk/);
+    assert.match(allMessages(), /Daily &lt;report&gt;/);
+    const todoReply = apiCalls.find((call) => String(call.payload.text).includes('Buy milk'));
+    assert.match(JSON.stringify(todoReply?.payload.reply_markup), /task:complete:42/);
+    const remindersReply = apiCalls.find((call) => String(call.payload.text).includes('Active reminders'));
+    assert.equal(remindersReply?.payload.reply_markup, undefined);
+  });
+
+  await t.test('a todo query failure does not hide active schedules', async (subtest) => {
+    subtest.mock.method(db, 'getTasksByUser', async () => { throw new Error('todo database unavailable'); });
+    apiCalls.length = 0;
+    await sendText('/tasks');
+    assert.match(allMessages(), /Failed to fetch todos/);
+    assert.match(allMessages(), /Daily &lt;report&gt;/);
+  });
+
+  await t.test('a reminder query failure is reported rather than claiming there are no tasks', async (subtest) => {
+    subtest.mock.method(store, 'listReminders', async () => { throw new Error('reminder database unavailable'); });
+    apiCalls.length = 0;
+    await sendText('/tasks');
+    assert.match(allMessages(), /Failed to fetch active reminders/);
+    assert.doesNotMatch(allMessages(), /You have no/);
+  });
+
+  await t.test('long reminder lists arrive in messages within the Telegram limit', async () => {
+    await store.createReminder({
+      userId: 4242, text: 'Long schedule '.repeat(800), frequency: 'weekly',
+      nextRunAt: '2026-10-06T14:00:00.000Z',
+    });
+    apiCalls.length = 0;
+    await sendText('/tasks');
+    assert.ok(messages().length > 1);
+    for (const message of messages()) {
+      assert.ok(message.replace(/<[^>]+>|&(?:lt|gt|amp);/g, '').length <= 4096);
+    }
+    assert.match(allMessages(), /\(weekly\)/);
+  });
+
+  await t.test('the empty response applies only when both sources are empty', async () => {
+    internals.store = new InMemoryAssistantStore();
+    apiCalls.length = 0;
+    await sendText('/tasks');
+    assert.match(lastMessage(), /no todos or active reminders/);
+  });
 });

@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A powerful, extensible Telegram bot built with TypeScript, designed for personal use. The bot uses the Telegraf framework for Telegram integration, Supabase for PostgreSQL storage, and a configurable LLM provider for conversational replies.
 
 **Tech Stack:**
-- **Runtime:** Node.js (v20+) with TypeScript (ESM — imports use `.js` extensions)
+- **Runtime:** Node.js 22.13+ (22.x) or 24+ with TypeScript (ESM — imports use `.js` extensions)
 - **Bot Framework:** Telegraf v4
 - **Database:** Supabase (PostgreSQL)
 - **AI:** DeepSeek (`deepseek-chat`) by default; Google Gemini also supported
@@ -118,6 +118,9 @@ src/
   bot.ts renders as Confirm/Cancel buttons. Nothing is written until a tap
 - Confirmations are persisted with the originating model turn, expire after 10 minutes,
   and are rejected if approved by a different user
+- Confirmation execution atomically consumes the pending row before any side effect;
+  ambiguous failures are not re-enabled for retry. `requested_at` stores the original
+  user-message timestamp separately from proposal creation time
 - Confirmed tools execute against the *original* request time, so "in 5 minutes" does not
   drift by however long the confirmation took
 
@@ -175,11 +178,12 @@ static strings with no interpolation.
 
 Required Supabase tables (full DDL in [docs/database-schema.sql](docs/database-schema.sql)):
 `user_data`, `command_history`, `tasks`, `prompts`, `conversations`, `facts`,
-`reminders`, `pending_actions`, `credentials`, `health_probes`, `token_usage`. The health
-check queries all of them, so a missing table makes `/health` report `unhealthy`.
+`reminders`, `pending_actions`, `credentials`, `health_probes`, `token_usage`. Readiness
+queries all of them, so a missing table makes `/ready` report `unhealthy`. `/health`
+never queries the database; both dependency probes have three-second deadlines.
 
-`conversations`, `facts`, `reminders`, `pending_actions`, `credentials`, `health_probes`
-and `token_usage` have Row Level Security enabled with only a `service_role` policy. **The
+All eleven tables have Row Level Security enabled with service-role access and
+anonymous/authenticated API grants revoked. **The
 bot must run with `SUPABASE_SERVICE_ROLE_KEY`**; never ship that key to a client.
 
 Two important consequences:
@@ -216,7 +220,7 @@ two lists disagree in either direction.
 1. Connect the GitHub repository to Railway
 2. Add environment variables in the Railway dashboard (including `DEEPSEEK_API_KEY`)
 3. Railway auto-detects Node.js and runs `npm start`
-4. For webhook mode: set `WEBHOOK_DOMAIN` to your Railway domain and `WEBHOOK_SECRET`
+4. For webhook mode: set `WEBHOOK_DOMAIN` to your Railway domain and the required `WEBHOOK_SECRET`
    to a random `A-Za-z0-9_-` string
 
 **Docker:** a multi-stage `Dockerfile` builds the same app for any container host.

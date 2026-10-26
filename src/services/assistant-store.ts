@@ -7,6 +7,7 @@ import type {
   NewReminder,
   PendingActionRecord,
   Reminder,
+  ReminderUpdate,
   TokenUsageRecord,
   TokenUsageSummary,
 } from '../types/assistant.js';
@@ -39,19 +40,24 @@ export interface AssistantStore {
   // --- Reminders ---
   createReminder(reminder: NewReminder): Promise<Reminder>;
   listReminders(userId: number, includeInactive?: boolean): Promise<Reminder[]>;
+  getReminder(id: number, userId: number): Promise<Reminder | null>;
+  /** Edits an active reminder owned by the user; null means it no longer exists. */
+  updateReminder(id: number, userId: number, update: ReminderUpdate): Promise<Reminder | null>;
   /** Reminders whose next run is at or before `now`, oldest first. */
   listDueReminders(now: Date, limit?: number): Promise<Reminder[]>;
   /**
-   * Records a delivery: sets the next run time and stamps last_sent_at in one
-   * step so a reminder can never be sent twice for the same occurrence.
+   * Records a delivery only if the scheduled occurrence still matches the
+   * snapshot that was delivered. Text-only edits do not invalidate it.
    */
-  markReminderSent(id: number, nextRunAt: string, sentAt: string): Promise<void>;
-  completeReminder(id: number, sentAt: string): Promise<void>;
+  markReminderSent(id: number, nextRunAt: string, sentAt: string, expected: Reminder): Promise<void>;
+  completeReminder(id: number, sentAt: string, expected: Reminder): Promise<void>;
   cancelReminder(id: number, userId: number): Promise<boolean>;
 
   // --- Pending confirmations ---
   createPendingAction(action: Omit<PendingActionRecord, 'id' | 'createdAt'>): Promise<PendingActionRecord>;
   getPendingAction(id: number, userId: number): Promise<PendingActionRecord | null>;
+  /** Atomically removes and returns a confirmation. Only one caller can consume it. */
+  consumePendingAction(id: number, userId: number): Promise<PendingActionRecord | null>;
   deletePendingAction(id: number): Promise<void>;
   deleteExpiredPendingActions(now: Date): Promise<number>;
 

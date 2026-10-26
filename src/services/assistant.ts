@@ -86,20 +86,21 @@ export class AssistantService {
 
   /** Executes a confirmed write tool and lets the model narrate the outcome. */
   async approvePendingAction(userId: number, actionId: number): Promise<ConversationReply> {
-    const action = await this.store.getPendingAction(actionId, userId);
+    // DELETE ... RETURNING in the persistent store is an atomic claim. Claim
+    // before any side effect so duplicate callbacks (even on another process)
+    // cannot execute the same action twice. Never restore an ambiguous write.
+    const action = await this.store.consumePendingAction(actionId, userId);
 
     if (!action) {
-      return { kind: 'message', text: 'That confirmation has expired. Please ask me again.' };
+      return { kind: 'message', text: 'That confirmation has expired or was already handled. Check your saved data before making the request again.' };
     }
 
     if (new Date(action.expiresAt).getTime() <= this.now().getTime()) {
-      await this.store.deletePendingAction(actionId);
       return { kind: 'message', text: 'That confirmation expired before it was approved, so nothing happened. Please ask me again.' };
     }
 
     const resolved = this.registry.resolve(action.toolName, action.args);
     if (!resolved.call) {
-      await this.store.deletePendingAction(actionId);
       return { kind: 'message', text: `I could not complete that: ${resolved.error}` };
     }
 
@@ -109,7 +110,7 @@ export class AssistantService {
       userId,
       store: this.store,
       timezone: this.timezone,
-      now: new Date(action.createdAt),
+      now: new Date(action.requestedAt ?? action.createdAt),
     };
 
     let result: string;
@@ -117,11 +118,8 @@ export class AssistantService {
       result = await this.registry.execute(resolved.call, context);
     } catch (error) {
       logger.error(`Confirmed tool ${action.toolName} failed`, error);
-      await this.store.deletePendingAction(actionId);
-      return { kind: 'message', text: 'Something went wrong carrying that out. Nothing was changed.' };
+      return { kind: 'message', text: 'I could not verify whether that action completed. Check your saved data before trying again; this confirmation will not run twice.' };
     }
-
-    await this.store.deletePendingAction(actionId);
 
     // Rebuild the paused turn explicitly rather than replaying the stored one.
     // Providers reject a tool result whose matching assistant `tool_calls`
@@ -150,15 +148,14 @@ export class AssistantService {
       { role: 'tool', toolCallId: callId, content: result },
     ];
 
-    return await this.runLoop(userId, messages, this.now());
+    return await this.runLoop(userId, messages, this.now(), context.now);
   }
 
   async rejectPendingAction(userId: number, actionId: number): Promise<ConversationReply> {
-    const action = await this.store.getPendingAction(actionId, userId);
-    if (action) {
-      await this.store.deletePendingAction(actionId);
-    }
-    return { kind: 'message', text: 'Okay, cancelled — I did not do anything.' };
+    const action = await this.store.consumePendingAction(actionId, userId);
+    return { kind: 'message', text: action
+      ? 'Okay, cancelled — I did not do anything.'
+      : 'That confirmation has expired or was already handled. An action already in progress cannot be cancelled.' };
   }
 
   /** Deletes expired confirmations. Called by the reminder poll. */
@@ -193,7 +190,7 @@ export class AssistantService {
     }
   }
 
-  private async runLoop(userId: number, modelMessages: AgentMessage[], now: Date): Promise<ConversationReply> {
+  private async runLoop(userId: number, modelMessages: AgentMessage[], now: Date, requestedAt: Date = now): Promise<ConversationReply> {
     const context: ToolContext = { userId, store: this.store, timezone: this.timezone, now };
 
     // Core facts shape behaviour unprompted, so they go in the prompt rather
@@ -216,9 +213,16 @@ export class AssistantService {
 
     // Live time context for this turn. Regenerated per request so it cannot go
     // stale, and deliberately not persisted into the stored conversation.
-    const systemInstruction = env.systemInstruction(now, this.timezone, factsBlock.text, {
+    let systemInstruction = env.systemInstruction(now, this.timezone, factsBlock.text, {
       coreFactCount: facts.length,
     });
+    if (requestedAt.getTime() !== now.getTime()) {
+      const originalTime = new Intl.DateTimeFormat('en-GB', {
+        timeZone: this.timezone, dateStyle: 'full', timeStyle: 'short',
+      }).format(requestedAt);
+      systemInstruction += `\nThis continues the user request received at ${originalTime} (${this.timezone}).`
+        + '\nRelative dates and times in that original request must remain anchored to its received time, even though the current time has advanced.';
+    }
     const messages: AgentMessage[] = [...modelMessages];
 
     // Fixed overhead for every request: the system prompt and the serialised
@@ -226,16 +230,11 @@ export class AssistantService {
     // requests" from "the tool schemas are simply expensive".
     const toolsChars = JSON.stringify(this.registry.toFunctionDeclarations()).length;
     const systemChars = systemInstruction.length;
-    const messageChars = messages.reduce((total, message) => total + JSON.stringify(message).length, 0);
-
-    logger.info('Request composition', {
-      systemChars,
-      toolsChars,
-      messageChars,
-      messages: messages.length,
-    });
-
     for (let iteration = 0; iteration < this.maxToolIterations; iteration++) {
+      const messageChars = messages.reduce((total, message) => total + JSON.stringify(message).length, 0);
+      logger.info('Request composition', {
+        systemChars, toolsChars, messageChars, messages: messages.length, iteration,
+      });
       const turn = await this.client.generate(messages, this.registry, systemInstruction);
 
       if (turn.usage) {
@@ -325,6 +324,7 @@ export class AssistantService {
           // in context after the user confirms. Only the model messages that
           // led here are stored: intermediate tool traffic is not persisted.
           modelParts: sanitizeForHistory(modelMessages),
+          requestedAt: requestedAt.toISOString(),
           expiresAt,
         });
 

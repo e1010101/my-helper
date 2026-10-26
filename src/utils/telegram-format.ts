@@ -85,12 +85,14 @@ export function markdownToTelegramHtml(markdown: string): string {
   text = text.replace(/^[ \t]{0,3}#{1,6}[ \t]+/gm, '');
   text = text.replace(/^[ \t]{0,3}>[ \t]?/gm, '');
 
-  // Restore code, then normalise list bullets.
+  // Normalise prose lists while code is still protected by placeholders.
+  text = text.replace(/^(\s*)[-+][ \t]+/gm, '$1• ');
+
+  // Restore literal code only after every prose transformation is complete.
   text = text.replace(/[\uE000]([CI])(\d+)[\uE001]/g, (_match, kind: string, index: string) => {
     const restored = kind === 'I' ? inlineCode[Number(index)] : codeBlocks[Number(index)];
     return restored ?? '';
   });
-  text = text.replace(/^(\s*)[-+][ \t]+/gm, '$1• ');
 
   return text;
 }

@@ -38,10 +38,10 @@ async function callTelegram<T>(method: string, body?: Record<string, unknown>): 
   return await response.json() as TelegramApiResponse<T>;
 }
 
-function resolveSecretToken(): string | undefined {
+function resolveSecretToken(): string {
   const secret = process.env.WEBHOOK_SECRET?.trim();
   if (!secret) {
-    return undefined;
+    throw new Error('WEBHOOK_SECRET is required before registering a webhook.');
   }
   if (!SECRET_PATTERN.test(secret)) {
     console.error('❌ WEBHOOK_SECRET is invalid: use only A-Z, a-z, 0-9, "_" and "-" (max 256 chars)');
@@ -94,7 +94,7 @@ async function registerWebhook(url: string): Promise<void> {
     console.log('⚠️  WEBHOOK_SECRET is not set: /webhook will accept unauthenticated requests.\n');
   }
 
-  const result = await callTelegram<boolean>('setWebhook', secret ? { url, secret_token: secret } : { url });
+  const result = await callTelegram<boolean>('setWebhook', { url, secret_token: secret });
 
   if (result.ok) {
     console.log('✅ Webhook set successfully!');

@@ -10,7 +10,7 @@ This document explains all available commands and how to add new ones.
 | `/help` | List commands (admin section only shown to admins) |
 | `/ping` | Responsiveness + latency |
 | `/task` | Task CRUD (`-create`, `-read`, `-update`, `-delete`) |
-| `/tasks` | List tasks with completion toggles |
+| `/tasks` | List to-dos with completion toggles and active reminders |
 | `/prompt` | Create a prompt template |
 | `/getprompt` | Search prompt templates |
 | `/status` | Admin: health, uptime, memory |
@@ -108,15 +108,18 @@ Task names and descriptions are HTML-escaped before being echoed back, so charac
 ---
 
 ### `/tasks`
-**Description:** List your saved tasks
+**Description:** List your saved to-dos and active reminders, including recurring schedules
 
 **Usage:** `/tasks`
 
 **Behavior:**
-1. Fetches your tasks from the `tasks` table
-2. Shows up to 20 tasks, newest first
-3. Displays status, name, description, and created date
-4. The `[1]`, `[2]`, … buttons toggle a task between completed (✅) and uncompleted (⬜)
+1. Fetches your to-dos and active reminders, including recurring schedules created through the assistant
+2. Shows up to 20 to-dos, newest first, and lists reminders separately with their cadence and next run times in your configured timezone
+3. Displays each item in its own card with its ID, status, and created timestamp. Reminder cards also show their recurrence rule, next run, last delivery, and timezone
+4. **Complete** / **Reopen** changes a to-do's completion status. Each card has **Edit** and **Delete** buttons
+5. **Edit** opens a pre-filled form; **Submit** (to-dos) or **Save** (reminders) applies changes, while **Cancel** discards them
+6. Reminder schedules accept expressions such as `every day at 22:00`, `every Monday at 09:00`, `every month on day 15 at 09:00`, and `tomorrow at 10:00`. Text-only edits preserve the current schedule
+7. **Delete** asks for confirmation. Confirming a reminder deletion stops its future runs and preserves the delivery history
 
 **Example:**
 ```

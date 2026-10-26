@@ -6,7 +6,9 @@ import type { AIClient, AgentMessage, ModelTurn, TokenUsage } from '../src/servi
 import { InMemoryAssistantStore } from '../src/services/in-memory-assistant-store.js';
 import { createDefaultToolRegistry } from '../src/tools/builtin-tools.js';
 import { localKey } from '../src/services/reminder-time.js';
-import type { ToolRegistry } from '../src/tools/registry.js';
+import { ToolRegistry } from '../src/tools/registry.js';
+import { breakdownRequest } from '../src/services/token-usage.js';
+import type { TokenUsageRecord } from '../src/types/assistant.js';
 
 const SINGAPORE = 'Asia/Singapore';
 const NOW = new Date('2026-03-10T01:00:00Z'); // 09:00 in Singapore
@@ -255,7 +257,7 @@ test('create_reminder composes with the time parser', async () => {
   assert.equal(reminder.text, 'Call mum');
   // "tomorrow at 07:30" is resolved against the time the user asked, so it must
   // land on the next day at 07:30 local, whatever today happens to be.
-  const tomorrow = new Date(Date.now() + 86_400_000);
+  const tomorrow = new Date(NOW.getTime() + 86_400_000);
   assert.equal(localKey(new Date(reminder.nextRunAt), SINGAPORE), `${localKey(tomorrow, SINGAPORE).slice(0, 10)}T07:30`);
 });
 
@@ -603,4 +605,116 @@ test('tool output is never replayed into the stored conversation', async () => {
   // Nor is it in the persisted history.
   const history = await store.getRecentMessages(1, 20);
   assert.ok(history.every((message) => !message.content.includes('Local time:')));
+});
+
+test('two service instances cannot execute the same confirmation twice', async () => {
+  const { service, store } = makeService([
+    callTurn({ id: 'create', name: 'create_reminder', args: { text: 'One reminder', when_text: 'in 5 minutes' } }),
+    textTurn('Saved once.'),
+  ]);
+  const otherService = new AssistantService({
+    store, registry: createDefaultToolRegistry(), client: new FakeClient([textTurn('Saved once.')]),
+    timezone: SINGAPORE, now: () => NOW,
+  });
+  const proposal = await service.processMessage(1, 'Remind me in five minutes');
+  assert.equal(proposal.kind, 'confirmation');
+  if (proposal.kind !== 'confirmation') return;
+  const replies = await Promise.all([
+    service.approvePendingAction(1, proposal.confirmation.id),
+    otherService.approvePendingAction(1, proposal.confirmation.id),
+  ]);
+  assert.equal((await store.listReminders(1)).length, 1);
+  assert.equal(replies.filter((reply) => reply.kind === 'message' && /already handled/.test(reply.text)).length, 1);
+});
+
+test('a write that commits then throws is not restored or reported as unchanged', async () => {
+  let writes = 0;
+  const registry = new ToolRegistry([{
+    name: 'ambiguous_write', description: 'test write', kind: 'write',
+    parameters: { type: 'object', properties: {} },
+    async execute() { writes += 1; throw new Error('Connection lost after commit'); },
+  }]);
+  const { service } = makeService([callTurn({ id: 'write', name: 'ambiguous_write' })], registry);
+  const proposal = await service.processMessage(1, 'Save this');
+  assert.equal(proposal.kind, 'confirmation');
+  if (proposal.kind !== 'confirmation') return;
+  const first = await service.approvePendingAction(1, proposal.confirmation.id);
+  await service.approvePendingAction(1, proposal.confirmation.id);
+  assert.equal(writes, 1);
+  assert.match(first.kind === 'message' ? first.text : '', /could not verify/);
+  assert.doesNotMatch(first.kind === 'message' ? first.text : '', /nothing was changed/i);
+});
+
+test('relative reminder dates retain the request day across midnight during model processing', async () => {
+  const store = new InMemoryAssistantStore();
+  let clock = new Date('2026-10-26T15:59:50Z');
+  const requestTime = clock.toISOString();
+  const client = new FakeClient([
+    callTurn({ id: 'create', name: 'create_reminder', args: { text: 'Tomorrow', when_text: 'tomorrow at 09:00' } }),
+    textTurn('Scheduled.'),
+  ]);
+  const generate = client.generate.bind(client);
+  client.generate = async (...args) => {
+    clock = new Date('2026-10-26T16:00:10Z');
+    return generate(...args);
+  };
+  const service = new AssistantService({ store, registry: createDefaultToolRegistry(), client, timezone: SINGAPORE, now: () => clock });
+  const proposal = await service.processMessage(1, 'Tomorrow at nine');
+  assert.equal(proposal.kind, 'confirmation');
+  if (proposal.kind !== 'confirmation') return;
+  assert.equal((await store.getPendingAction(proposal.confirmation.id, 1))?.requestedAt, requestTime);
+  await service.approvePendingAction(1, proposal.confirmation.id);
+  assert.equal(localKey(new Date((await store.listReminders(1))[0].nextRunAt), SINGAPORE), '2026-10-27T09:00');
+});
+
+test('chained confirmations retain the original request date while refreshing current time and expiry', async () => {
+  const store = new InMemoryAssistantStore();
+  let clock = new Date('2026-10-26T15:59:50Z');
+  const requestTime = clock.toISOString();
+  const client = new FakeClient([
+    callTurn({ id: 'fact', name: 'save_fact', args: { key: 'home_city', value: 'Singapore' } }),
+    callTurn({ id: 'reminder', name: 'create_reminder', args: { text: 'Tomorrow', when_text: 'tomorrow at 09:00' } }),
+    textTurn('Scheduled.'),
+  ]);
+  const service = new AssistantService({ store, registry: createDefaultToolRegistry(), client, timezone: SINGAPORE, now: () => clock });
+  const first = await service.processMessage(1, 'Remember my city is Singapore and remind me tomorrow at nine');
+  assert.equal(first.kind, 'confirmation');
+  if (first.kind !== 'confirmation') return;
+
+  clock = new Date('2026-10-26T16:00:10Z');
+  const second = await service.approvePendingAction(1, first.confirmation.id);
+  assert.equal(second.kind, 'confirmation');
+  if (second.kind !== 'confirmation') return;
+  const pending = await store.getPendingAction(second.confirmation.id, 1);
+  assert.equal(pending?.requestedAt, requestTime, 'the second write belongs to the same original request');
+  assert.equal(pending?.expiresAt, '2026-10-26T16:10:10.000Z', 'the new proposal gets a fresh confirmation window');
+  assert.match(client.systemInstructions[1]!, /27 October 2026/, 'current time is refreshed');
+  assert.match(client.systemInstructions[1]!, /26 October 2026/, 'the original request anchor remains explicit to the model');
+
+  await service.approvePendingAction(1, second.confirmation.id);
+  assert.equal((await store.getFact(1, 'home_city'))?.value, 'Singapore');
+  assert.equal(localKey(new Date((await store.listReminders(1))[0].nextRunAt), SINGAPORE), '2026-10-27T09:00');
+});
+
+test('tool results are included in the measured composition of the next model call', async () => {
+  const registry = new ToolRegistry([{
+    name: 'large_result', description: 'Returns a large test result', kind: 'read',
+    parameters: { type: 'object', properties: {} },
+    async execute() { return 'x'.repeat(40_000); },
+  }]);
+  const { service, store, client } = makeService([
+    callTurn({ id: 'large', name: 'large_result' }), textTurn('Done.'),
+  ], registry);
+  client.usage = { promptTokens: 12_000, completionTokens: 10, totalTokens: 12_010 };
+  const records: TokenUsageRecord[] = [];
+  store.recordTokenUsage = async (record) => { records.push(record); };
+  await service.processMessage(1, 'Read it');
+  const expected = breakdownRequest({
+    systemChars: client.systemInstructions[1]!.length,
+    toolsChars: JSON.stringify(registry.toFunctionDeclarations()).length,
+    messagesChars: client.calls[1].reduce((sum, message) => sum + JSON.stringify(message).length, 0),
+  }, 12_000);
+  assert.equal(records[1].messagesTokens, expected.messages);
+  assert.equal(records[1].systemTokens, expected.system);
+  assert.ok(records[1].messagesTokens > 10_000, 'the large tool result dominates the second prompt');
 });

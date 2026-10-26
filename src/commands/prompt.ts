@@ -1,6 +1,7 @@
 import { Context } from 'telegraf';
 import { db } from '../services/database.js';
 import { escapeHtml } from '../utils/telegram-format.js';
+import { splitTelegramHtml } from '../utils/telegram-chunk.js';
 
 type PromptField = 'title' | 'prompt' | 'tags' | 'image';
 
@@ -11,13 +12,20 @@ interface PromptDraft {
     tags?: string[];
     imageFileId?: string;
     step: PromptField;
+    saving?: boolean;
 }
 
 /** One in-progress draft per user, so a form never bleeds across users. */
 const promptDrafts = new Map<number, PromptDraft>();
 
-export function isUserInPromptFlow(userId: number): boolean {
-    return promptDrafts.has(userId);
+/** Starting another form explicitly replaces any unfinished prompt form. */
+export function cancelPromptFlow(userId: number): void {
+    promptDrafts.delete(userId);
+}
+
+export function isUserInPromptFlow(userId: number, chatId?: number): boolean {
+    const draft = promptDrafts.get(userId);
+    return !!draft && (chatId === undefined || draft.chatId === chatId);
 }
 
 function resetDraft(userId: number, chatId: number): PromptDraft {
@@ -58,9 +66,10 @@ export async function promptTextInputHandler(ctx: Context): Promise<boolean> {
     }
 
     const draft = promptDrafts.get(userId);
-    if (!draft) {
+    if (!draft || ctx.chat?.id !== draft.chatId) {
         return false;
     }
+    if (draft.saving) return true;
 
     if (draft.step === 'title') {
         draft.title = text;
@@ -109,9 +118,10 @@ export async function promptPhotoInputHandler(ctx: Context): Promise<boolean> {
     }
 
     const draft = promptDrafts.get(userId);
-    if (!draft || draft.step !== 'image') {
+    if (!draft || draft.step !== 'image' || ctx.chat?.id !== draft.chatId) {
         return false;
     }
+    if (draft.saving) return true;
 
     // Telegram sends multiple sizes. The last element is the highest resolution.
     const highestResolutionPhoto = photo[photo.length - 1];
@@ -123,15 +133,24 @@ export async function promptPhotoInputHandler(ctx: Context): Promise<boolean> {
         return true;
     }
 
+    draft.saving = true;
     try {
         await db.savePrompt(userId, draft.title, draft.promptText, draft.tags || [], draft.imageFileId);
-
-        promptDrafts.delete(userId);
-        await ctx.reply(`✅ Prompt '${escapeHtml(draft.title)}' saved successfully!`, { parse_mode: 'HTML' });
     } catch (error) {
+        draft.saving = false;
         console.error('Error saving prompt to database:', error);
         // Keep the draft so the user can simply resend the photo and retry.
         await ctx.reply('❌ Failed to save prompt. Please try again later.');
+        return true;
+    }
+
+    if (promptDrafts.get(userId) === draft) promptDrafts.delete(userId);
+    try {
+        for (const chunk of splitTelegramHtml(`✅ Prompt '${escapeHtml(draft.title)}' saved successfully!`)) {
+            await ctx.reply(chunk, { parse_mode: 'HTML' });
+        }
+    } catch (error) {
+        console.error('Prompt saved but confirmation message failed:', error);
     }
 
     return true;

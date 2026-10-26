@@ -70,6 +70,26 @@ ApiClient.prototype.callApi = async function (method: string, payload: unknown) 
 
 const { Bot } = await import('../src/bot.js');
 
+test('webhook startup rejects missing or invalid secrets before any Telegram API call', async () => {
+  const originalSecret = process.env.WEBHOOK_SECRET;
+  try {
+    for (const secret of [undefined, '', '   ', 'contains/slash', 'x'.repeat(257)]) {
+      if (secret === undefined) delete process.env.WEBHOOK_SECRET;
+      else process.env.WEBHOOK_SECRET = secret;
+      const target = new Bot();
+      const before = apiCalls.length;
+      try {
+        await assert.rejects(target.start(), /WEBHOOK_SECRET is required/);
+        assert.equal(apiCalls.length, before, 'invalid configuration must not register a webhook or start serving');
+      } finally {
+        target.dispose();
+      }
+    }
+  } finally {
+    process.env.WEBHOOK_SECRET = originalSecret;
+  }
+});
+
 interface FakeResponse {
   statusCode: number;
   body: string;

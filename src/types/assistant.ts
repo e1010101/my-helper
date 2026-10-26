@@ -68,6 +68,12 @@ export interface NewReminder {
   dayOfMonth?: number | null;
 }
 
+/** A text edit leaves the current schedule untouched unless supplied here. */
+export interface ReminderUpdate {
+  text: string;
+  schedule?: Omit<NewReminder, 'userId' | 'text'>;
+}
+
 export interface PendingActionRecord {
   id: number;
   userId: number;
@@ -75,6 +81,8 @@ export interface PendingActionRecord {
   args: Record<string, unknown>;
   /** The model turn that requested the call, kept so the loop can resume. */
   modelParts: unknown[];
+  /** Original user request time; absent only on confirmations from older versions. */
+  requestedAt?: string;
   createdAt: string;
   expiresAt: string;
 }

@@ -7,7 +7,7 @@ A powerful, extensible Telegram bot for personal assistance, built with TypeScri
 - 🔐 **Secure** - User-specific data storage with Supabase
 - 🧠 **Persistent memory** - Conversations, facts and reminders live in Postgres, not RAM
 - ⏰ **Reminders** - "remind me in 30 minutes", "every Monday at 9am", with timezone-correct scheduling
-- 🤝 **Confirm-before-write** - The assistant proposes actions; nothing changes your data until you tap Confirm
+- 🤝 **Confirm-before-write** - AI-proposed changes require a Confirm tap; explicit forms save on Submit or Save
 - 📝 **Task Capture** - Create, edit and persist to-do tasks
 - 💬 **AI Chat** - Free-form messages are answered by a configurable model (DeepSeek by default), with tools for your own data
 - 📄 **Prompt Library** - Save prompt templates with tags and an image, then search them
@@ -27,13 +27,13 @@ A powerful, extensible Telegram bot for personal assistance, built with TypeScri
 - **Database:** [Supabase](https://supabase.com/) (PostgreSQL)
 - **AI:** [DeepSeek](https://platform.deepseek.com/) (`deepseek-chat`) by default; Google Gemini also supported via `AI_PROVIDER`
 - **Hosting:** [Railway.app](https://railway.app/) (recommended, free tier available)
-- **Runtime:** Node.js 20+
+- **Runtime:** Node.js 22.13+ (22.x), or Node.js 24+
 
 ## 🚀 Quick Start
 
 ### 1. Prerequisites
 
-- Node.js 20 or higher
+- Node.js 22.13+ (22.x), or Node.js 24+
 - A Telegram account
 - A Supabase account (free tier is sufficient)
 
@@ -85,7 +85,7 @@ npm start
 - `/help` - List all available commands
 - `/ping` - Check bot responsiveness
 - `/task` - Manage to-do tasks (see [`/task` Usage](#task-usage))
-- `/tasks` - List your saved tasks
+- `/tasks` - List your saved to-dos and active reminders (including recurring schedules)
 - `/prompt` - Create a prompt template (title, text, tags, image)
 - `/getprompt` - Search your saved prompts
 - `/forget` - Clear conversation memory (facts and reminders survive)
@@ -113,8 +113,15 @@ Any plain text message is handled by the configured model, which can call tools 
 | "what's the weather like?" | Current conditions for your stored home city |
 | "will it rain on Saturday?" | Multi-day outlook, up to 7 days |
 
-**Nothing that writes your data happens without an explicit Confirm tap.** Read-only
-questions are answered directly. Confirmations expire after 10 minutes.
+**AI-proposed changes require an explicit Confirm tap.** Read-only questions are
+answered directly; conversation history is saved automatically. Explicit commands and
+forms use their own controls. Confirmations expire after 10 minutes and are atomically
+consumed before execution, so repeat taps cannot execute the same action twice. If a
+write's outcome is uncertain, check your saved data before asking again.
+
+Relative times use the original message's timestamp. ISO dates without an offset use
+the configured timezone. Daily and single-weekday recurrence are supported; requests
+such as "every weekday" are rejected rather than silently scheduled on Monday only.
 
 Reminders are stored in Postgres and polled by a scheduler, so they survive restarts;
 a reminder that came due while the bot was offline is delivered marked "(missed earlier)".
@@ -211,8 +218,10 @@ Expected behavior:
 ### `/tasks` Usage
 
 1. Send `/tasks`
-2. Bot returns your most recent saved tasks (up to 20), newest first
-3. Use the inline keyboard buttons (e.g., `[1]`, `[2]`) below the message to toggle tasks as completed (✅) or uncompleted (⬜)
+2. Bot returns your most recent saved to-dos (up to 20), newest first, and your active reminders, including recurring schedules, with their next run times in your configured timezone
+3. Each item has its own card with an ID, status, timestamps, and **Edit** / **Delete** buttons. To-dos also have **Complete** / **Reopen** buttons
+4. **Edit** opens a pre-filled form. For reminders, edit the text or schedule (e.g. `every day at 22:00`, `every Monday at 09:00`, `every month on day 15 at 09:00`, or `tomorrow at 10:00`), then tap **Save**. To-dos use **Submit**. **Cancel** discards your edits
+5. **Delete** asks for confirmation. Deleting a reminder stops its future runs; its delivery history is retained
 
 ### `/prompt` Usage
 
@@ -296,6 +305,10 @@ my-helper/
 ```bash
 npm test          # node:test suites under tests/
 ```
+
+`npm test` blocks external HTTP requests and uses dummy credentials. The schema tests
+run PostgreSQL locally through PGlite, including anonymous-access rejection and
+repeatable migration checks; they do not connect to your Supabase project.
 
 The assistant layer is built around interfaces (`AssistantStore`, `AIClient`,
 `ToolRegistry`, `Clock`) with in-memory implementations, so the reminder scheduler, the
@@ -404,13 +417,13 @@ The bot includes comprehensive monitoring features:
 
 ### Health Endpoint
 - **`/health`** (and `/`) — liveness. Returns 200 while the process is serving and can
-  reach Telegram. A database outage is reported in the body but does not fail this
-  check, because restarting cannot repair a database and a crash loop would take the
-  bot down rather than degrade it. This is what Railway's healthcheck uses.
+  reach Telegram. It does not query the database; `database.checked` is false. This
+  keeps database outages from blocking the platform's liveness check.
 - **`/ready`** — readiness. Returns 503 unless the database is genuinely writable
   (verified with a write probe, since RLS makes reads look fine when they are not).
-  Use this one for UptimeRobot or any external monitor.
-- Reports `unhealthy` (HTTP 503) if the Telegram API or any required table is unreachable
+  Use this one for UptimeRobot or any external monitor. Telegram and database probes
+  have independent three-second deadlines and cancel stalled requests.
+- `/ready` reports `unhealthy` (HTTP 503) if Telegram or any required table is unreachable
 - Use with UptimeRobot or Better Uptime for 24/7 monitoring
 
 ### Admin Commands
@@ -438,9 +451,10 @@ The bot requires these Supabase tables:
 - `pending_actions` - Write-tool confirmations awaiting a tap
 - `credentials` - Provider tokens (service_role only)
 - `health_probes` - Single fixed row the `/ready` write probe upserts
+- `token_usage` - Per-model-call token accounting
 
 Run the SQL from `docs/database-schema.sql` in your Supabase SQL Editor to create these tables.
-The health endpoint reports `unhealthy` if any of them is missing.
+The readiness endpoint reports `unhealthy` if any of them is missing.
 
 Or apply it from the command line (needs `psql` on PATH and `DATABASE_URL` in `.env`):
 
@@ -451,16 +465,23 @@ npm run db:migrate
 The script applies the schema, then prints per-table status including which tables have
 Row Level Security enabled, so you can confirm the migration took effect.
 
+**Upgrading an existing deployment:** apply the updated schema before starting the new
+application. It adds `pending_actions.requested_at`, enables RLS on the older task and
+prompt tables, and revokes anonymous/authenticated API grants on all private tables.
+Keep `SUPABASE_SERVICE_ROLE_KEY` configured. Webhook deployments also require a valid
+`WEBHOOK_SECRET`; missing or invalid secrets now stop startup before registration.
+The migration is repeatable and preserves existing rows.
+
 Before deploying — or whenever something looks wrong — run the preflight check:
 
 ```bash
 npm run preflight
 ```
 
-It verifies every required variable, that the Telegram token works, that all ten tables
+It verifies every required variable, that the Telegram token works, that all eleven tables
 exist, that the service-role key can actually write to the RLS-protected tables, that the
 anon key is correctly refused, that the configured model answers, and that reminders have
-a delivery destination. Read-only against your data.
+a delivery destination. It makes provider requests and temporary database write probes.
 
 After deploying, check the live instance the same way:
 
@@ -472,10 +493,9 @@ It confirms both health endpoints answer correctly, that Telegram is pointed at 
 deployment with the secret configured, and that webhook delivery has no errors. Reminder
 delivery itself cannot be checked through the Bot API, so that stays a manual step.
 
-**Row Level Security:** `conversations`, `facts`, `reminders`, `pending_actions` and
-`credentials` have RLS enabled with only a `service_role` policy, so they are unreadable
-with the public key. Set `SUPABASE_SERVICE_ROLE_KEY` or the assistant features will fail —
-`/health` will tell you exactly that.
+**Row Level Security:** all eleven tables have RLS enabled and server-only service-role
+access. Anonymous and authenticated API grants are revoked. Set
+`SUPABASE_SERVICE_ROLE_KEY` or persistence will fail; `/ready` reports database failures.
 
 ## 🔒 Security
 

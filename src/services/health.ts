@@ -1,5 +1,9 @@
 import { Telegraf } from 'telegraf';
 
+// Telegraf declares the older abort-controller shim, but node-fetch accepts
+// native Node signals with the same runtime abort protocol.
+type TelegramAbortSignal = NonNullable<Parameters<Telegraf['telegram']['callApi']>[2]>['signal'];
+
 export interface HealthStatus {
   status: 'healthy' | 'unhealthy';
   uptime: number;
@@ -10,6 +14,8 @@ export interface HealthStatus {
   };
   database: {
     connected: boolean;
+    /** False for liveness, which deliberately never waits for the database. */
+    checked?: boolean;
     latency?: number;
     error?: string;
   };
@@ -27,33 +33,44 @@ export interface HealthStatus {
 export class HealthService {
   private startTime: number;
   private bot: Telegraf;
+  private timeoutMs: number;
 
-  constructor(bot: Telegraf) {
+  constructor(bot: Telegraf, options: { timeoutMs?: number } = {}) {
     this.startTime = Date.now();
     this.bot = bot;
+    this.timeoutMs = options.timeoutMs ?? 3000;
   }
 
-  async getHealthStatus(): Promise<HealthStatus> {
+  async getHealthStatus(options: { checkDatabase?: boolean } = {}): Promise<HealthStatus> {
     const uptime = Date.now() - this.startTime;
     const memUsage = process.memoryUsage();
+    const checkDatabase = options.checkDatabase !== false;
 
-    // Check bot connection
-    let botConnected = false;
-    try {
-      await this.bot.telegram.getMe();
-      botConnected = true;
-    } catch (error) {
-      console.error('Bot health check failed:', error);
-    }
-
-    // Check database connection
-    const dbStatus = await this.checkDatabaseHealth();
+    // Independent, bounded probes. Liveness does not initiate database work at
+    // all: even a stalled database must not hold the platform check open.
+    const [botConnected, dbStatus] = await Promise.all([
+      this.withDeadline((signal) => this.bot.telegram.callApi('getMe', {}, {
+        signal: signal as unknown as TelegramAbortSignal,
+      }))
+        .then(() => true, (error: unknown) => {
+          console.error('Bot health check failed:', error);
+          return false;
+        }),
+      checkDatabase
+        ? this.withDeadline((signal) => this.checkDatabaseHealth(signal))
+          .then((status) => ({ ...status, checked: true }), (error: unknown) => ({
+            connected: false,
+            checked: true,
+            error: error instanceof Error ? error.message : String(error),
+          }))
+        : Promise.resolve({ connected: false, checked: false }),
+    ]);
 
     const memoryUsed = memUsage.heapUsed / 1024 / 1024; // Convert to MB
     const memoryTotal = memUsage.heapTotal / 1024 / 1024;
     const memoryPercentage = (memoryUsed / memoryTotal) * 100;
 
-    const isHealthy = botConnected && dbStatus.connected;
+    const isHealthy = botConnected && (!checkDatabase || dbStatus.connected);
 
     return {
       status: isHealthy ? 'healthy' : 'unhealthy',
@@ -76,23 +93,35 @@ export class HealthService {
     };
   }
 
-  private async checkDatabaseHealth(): Promise<{ connected: boolean; latency?: number; error?: string }> {
+  private async withDeadline<T>(probe: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`Health probe timed out after ${this.timeoutMs}ms`));
+        controller.abort();
+      }, this.timeoutMs);
+    });
+    try {
+      // Race as well as abort: an adapter that ignores cancellation must not
+      // stop the health endpoint from responding by its deadline.
+      return await Promise.race([probe(controller.signal), timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async checkDatabaseHealth(signal: AbortSignal): Promise<{ connected: boolean; latency?: number; error?: string }> {
     try {
       const { db } = await import('./database.js');
       const start = Date.now();
 
-      // conversations/facts/reminders/pending_actions/credentials have RLS
-      // enabled. Probing only the tables that already exist keeps a fresh
-      // deployment diagnosable while the schema is still being applied.
+      // Readiness validates every required table, then checks writability.
       const checks = await Promise.all([
-        db.getClient().from('user_data').select('user_id').limit(1),
-        db.getClient().from('command_history').select('id').limit(1),
-        db.getClient().from('tasks').select('id').limit(1),
-        db.getClient().from('prompts').select('id').limit(1),
-        db.getClient().from('conversations').select('id').limit(1),
-        db.getClient().from('facts').select('id').limit(1),
-        db.getClient().from('reminders').select('id').limit(1),
-        db.getClient().from('health_probes').select('id').limit(1),
+        db.getClient().from('user_data').select('user_id').limit(1).abortSignal(signal),
+        ...['command_history', 'tasks', 'prompts', 'conversations', 'facts',
+          'reminders', 'pending_actions', 'credentials', 'health_probes', 'token_usage']
+          .map((table) => db.getClient().from(table).select('id').limit(1).abortSignal(signal)),
       ]);
 
       const failedCheck = checks.find(result => result.error);
@@ -103,7 +132,7 @@ export class HealthService {
       // Reading an RLS-protected table with the wrong key does not error, it
       // simply returns no rows, so a SELECT can never detect a missing
       // service_role key. A write can, and nothing works without one.
-      const writeProblem = await probeAssistantTablesWritable();
+      const writeProblem = await probeAssistantTablesWritable(signal);
       if (writeProblem) {
         throw new Error(writeProblem);
       }
@@ -159,7 +188,7 @@ export class HealthService {
  *
  * Returns a description of the problem, or null when the tables are writable.
  */
-async function probeAssistantTablesWritable(): Promise<string | null> {
+async function probeAssistantTablesWritable(signal: AbortSignal): Promise<string | null> {
   const PROBE_ID = 'startup-readiness';
 
   try {
@@ -168,7 +197,8 @@ async function probeAssistantTablesWritable(): Promise<string | null> {
 
     const { error: upsertError } = await client
       .from('health_probes')
-      .upsert({ id: PROBE_ID, checked_at: new Date().toISOString() }, { onConflict: 'id' });
+      .upsert({ id: PROBE_ID, checked_at: new Date().toISOString() }, { onConflict: 'id' })
+      .abortSignal(signal);
 
     if (upsertError) {
       if (/permission denied|row-level security|violates row-level/i.test(upsertError.message)) {

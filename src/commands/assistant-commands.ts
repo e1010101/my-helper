@@ -1,6 +1,7 @@
 import type { Telegraf, Context } from 'telegraf';
 import type { AssistantService } from '../services/assistant.js';
 import { formatFacts, formatReminders, formatUsage } from '../utils/memory-format.js';
+import { splitTelegramHtml } from '../utils/telegram-chunk.js';
 
 /** How far back the token usage summary looks. */
 const USAGE_WINDOW_DAYS = 30;
@@ -52,14 +53,15 @@ export function registerAssistantCommands(
         ? formatUsage(usage, USAGE_WINDOW_DAYS)
         : '(unavailable — has the token_usage table been created?)';
 
-      await ctx.reply(
+      const memory =
         `🧠 <b>What I remember</b>\n\n` +
         `<b>Facts &amp; preferences</b>\n${formatFacts(facts)}\n\n` +
         `<b>Reminders</b>\n${formatReminders(reminders, timezone)}\n\n` +
         `<b>Conversation</b>\n${messages} stored message(s)\n\n` +
-        `<b>Token usage</b>\n${usageText}`,
-        { parse_mode: 'HTML' }
-      );
+        `<b>Token usage</b>\n${usageText}`;
+      for (const chunk of splitTelegramHtml(memory)) {
+        await ctx.reply(chunk, { parse_mode: 'HTML' });
+      }
     } catch (error) {
       console.error('Memory command error:', error);
       await ctx.reply('❌ Failed to read stored memory.');

@@ -25,9 +25,9 @@ Any message that does not start with `/` goes to the model, which can call tools
 | "add buy milk to my todo list" | Proposes `add_todo`; the task then shows up in `/tasks` |
 | "what's on my list?" | Lists your open tasks |
 
-**Nothing that changes your data happens without a Confirm tap.** Read-only tools run silently. A write stops the conversation and shows Confirm / Cancel buttons, which expire after 10 minutes.
+**AI-proposed changes require a Confirm tap.** Read-only tools run silently. A write stops the conversation and shows Confirm / Cancel buttons, which expire after 10 minutes. Chat history is persisted automatically; explicit commands and forms use their own controls. Confirmations are atomically consumed before execution, so concurrent taps cannot run one action twice.
 
-**Time phrases the reminder parser understands:** "in 30 minutes", "in 2 hours", "in 3 days", "today at 18:00", "tonight at 8pm", "tomorrow at 07:30", "monday at 09:00", "every day at 09:00", "every monday at 09:00", and an ISO timestamp. "every weekday" is accepted but anchors to Monday only. Reminders live in Postgres, so they survive restarts, and one that came due while the bot was down is delivered marked "(missed earlier)".
+**Time phrases the reminder parser understands:** "in 30 minutes", "in 2 hours", "in 3 days", "today at 18:00", "tonight at 8pm", "tomorrow at 07:30", "monday at 09:00", "every day at 09:00", "every monday at 09:00", and an ISO timestamp. ISO input without an offset uses the configured timezone. Unsupported multi-day schedules such as "every weekday" are rejected. DST gaps shift forward by the missing interval; repeated times choose the earlier instant. Reminders live in Postgres, so they survive restarts, and one that came due while the bot was down is delivered marked "(missed earlier)".
 
 ### Commands
 
@@ -55,7 +55,7 @@ Any message that does not start with `/` goes to the model, which can call tools
 ### Not yet
 
 - No calendar, weather, maps or restaurant lookups.
-- Recurring reminders are daily or on one weekday; monthly recurrence exists in the schema but the parser never produces it.
+- Recurring reminders are daily or on one weekday; the reminder editor also supports monthly recurrence.
 - Conversation history is capped at 40 messages, not summarised.
 
 ---
@@ -73,7 +73,7 @@ flowchart TB
     end
 
     subgraph Supabase["Supabase (managed Postgres)"]
-        PG[("9 tables<br/>RLS on the private ones")]
+        PG[("11 tables<br/>RLS on all tables")]
     end
 
     DeepSeek["DeepSeek API<br/>deepseek-chat"]
@@ -220,7 +220,7 @@ flowchart TD
 
     Gate["Stop the loop.<br/>Save a pending_action row<br/>with a 10-minute expiry"] --> Confirm["Reply with<br/>Confirm / Cancel buttons"]
     Confirm --> Tapped{"user taps"}
-    Tapped -->|Confirm| RunTool["Execute the tool<br/>against the ORIGINAL request time"]
+    Tapped -->|Confirm| RunTool["Atomically consume the action,<br/>then execute against<br/>the ORIGINAL request time"]
     Tapped -->|Cancel| Drop["Delete the pending action,<br/>change nothing"]
     RunTool --> Feed
 
@@ -300,7 +300,7 @@ flowchart LR
 
 ## 6. Data model
 
-Nine tables, in two groups. The six assistant tables have Row Level Security and are closed to the public key entirely; the three legacy tables do not.
+Eleven tables, all protected by Row Level Security and explicit server-only grants. Anonymous and authenticated Data API roles have no access; application queries enforce Telegram user ownership through the service-role connection.
 
 ### Assistant tables (RLS enabled)
 
@@ -339,6 +339,7 @@ erDiagram
         text tool_name
         jsonb args
         jsonb model_parts "the paused turn"
+        timestamptz requested_at "original user message time"
         timestamptz expires_at
     }
     credentials {
@@ -353,7 +354,7 @@ erDiagram
     }
 ```
 
-### Legacy tables (no RLS)
+### Task and prompt tables (RLS enabled)
 
 Used by the explicit `/task` and `/prompt` commands and the usage middleware.
 
@@ -384,7 +385,7 @@ erDiagram
     }
 ```
 
-`user_data` is the ninth table and holds generic key/value JSON; it is unused by the current features but part of the original schema.
+`user_data` holds generic key/value JSON; it is unused by the current features but part of the original schema. `token_usage` records every model call. Usage reports read bounded pages through a fixed maximum ID, so API row caps do not silently truncate totals.
 
 ### Row Level Security
 
@@ -393,13 +394,10 @@ flowchart LR
     Service["service_role key<br/>(server only)"]
     Anon["anon key<br/>(shareable)"]
 
-    Private["RLS enabled, service_role only<br/><br/>conversations, facts, reminders,<br/>pending_actions, credentials,<br/>health_probes"]
-    Open["No RLS, legacy tables<br/><br/>tasks, prompts,<br/>command_history, user_data"]
+    Private["RLS enabled, service_role only<br/><br/>All 11 tables, including<br/>tasks, prompts, user_data,<br/>command_history and token_usage"]
 
     Service --> Private
-    Service --> Open
-    Anon --> Open
-    Anon -.->|"refused: reads return zero rows<br/>rather than erroring"| Private
+    Anon -.->|"refused: API grants revoked"| Private
 
     classDef danger fill:#ffe3e3,stroke:#e03131,color:#1f2328
     classDef private fill:#dbe4ff,stroke:#5b7bd5,color:#1f2328
@@ -407,7 +405,7 @@ flowchart LR
     class Private private
 ```
 
-The behaviour of the anon key against a protected table is the important detail: **it does not error, it returns zero rows.** A health check that only ran a `SELECT` would therefore report everything fine while the bot silently remembered nothing. That is why the readiness probe performs a **write**, and why it writes to a dedicated `health_probes` table with a fixed primary key — a monitor polling every 30 seconds must never be able to accumulate rows or burn through a sequence.
+The schema revokes client-role table grants as well as enabling RLS. With an accidentally restored read grant, RLS can return zero rows instead of an error. Readiness therefore also writes a dedicated `health_probes` row with a fixed primary key, which avoids accumulating rows. `/health` does not initiate database queries; `/ready` checks all tables and writability. Both Telegram and database probes have independent three-second deadlines.
 
 ---
 
@@ -494,11 +492,11 @@ sequenceDiagram
 
     U->>B: taps Confirm
     B->>A: approve<br/>PendingAction()
+    A->>D: atomic DELETE RETURNING<br/>claim pending action
     Note over A: execute against<br/>the ORIGINAL<br/>request time
     A->>D: insert reminder<br/>(next_run_at = +2h)
     A->>M: tool result,<br/>so it can narrate
     M-->>A: "Done, I'll remind<br/>you at 22:45"
-    A->>D: delete the<br/>pending action
     A-->>B: reply text
     B->>U: confirmation<br/>message
 
@@ -532,7 +530,7 @@ The unprompted DM at the end is the point of the whole system, and the reason th
 
 Written down rather than left implied:
 
-- **Reminder repeat is one weekday per reminder.** "Every weekday" anchors to Monday; there is no multi-day schedule.
+- **Reminder repeat is one weekday per reminder.** Unsupported multi-day schedules such as "every weekday" are rejected.
 - **`user_data` is unused.** It came with the original scaffold and nothing reads it.
 - **Conversation history is capped, not summarised.** Beyond 40 messages, older turns simply are not sent — there is no compression.
 - **Deploys are manual.** The Railway service was created by uploading the working tree, so it is not connected to GitHub and does not redeploy on push.

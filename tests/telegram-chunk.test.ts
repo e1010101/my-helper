@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { splitTelegramHtml, TELEGRAM_MESSAGE_LIMIT, TELEGRAM_CHUNK_LIMIT } from '../src/utils/telegram-chunk.js';
+import { splitTelegramHtml, telegramVisibleLength, TELEGRAM_MESSAGE_LIMIT, TELEGRAM_CHUNK_LIMIT } from '../src/utils/telegram-chunk.js';
 import { markdownToTelegramHtml } from '../src/utils/telegram-format.js';
 
 const TAG_PATTERN = /<(\/?)([a-zA-Z][a-zA-Z0-9-]*)((?:"[^"]*"|'[^']*'|[^>])*)>/g;
@@ -181,4 +181,76 @@ test('chunking a converted model answer keeps it readable', () => {
     assertWellFormed(chunk);
     assert.ok(visibleLength(chunk) <= TELEGRAM_MESSAGE_LIMIT);
   }
+});
+
+test('an emoji at a chunk boundary is never split into surrogate halves', () => {
+  const source = 'x'.repeat(TELEGRAM_CHUNK_LIMIT - 1) + '😀tail';
+  const chunks = splitTelegramHtml(source);
+  assert.equal(chunks.join(''), source);
+  assert.equal(chunks.length, 2);
+  for (const chunk of chunks) {
+    assert.doesNotThrow(() => encodeURIComponent(chunk), 'chunk contains an unpaired surrogate');
+    assert.ok(telegramVisibleLength(chunk) <= TELEGRAM_CHUNK_LIMIT);
+  }
+});
+
+test('astral text and numeric entities use consistent length accounting under formatting', () => {
+  const content = '😀&#x1F600;&#128512;&amp;'.repeat(1000);
+  const source = `<b>${content}</b>`;
+  const chunks = splitTelegramHtml(source, 1024);
+  assert.equal(chunks.map((chunk) => chunk.replace(TAG_PATTERN, '')).join(''), content);
+  for (const chunk of chunks) {
+    assertWellFormed(chunk);
+    assert.doesNotThrow(() => encodeURIComponent(chunk));
+    assert.ok(telegramVisibleLength(chunk) <= 1024);
+  }
+  assert.equal(telegramVisibleLength('<b>😀&#x1F600;&#128512;&amp;</b>'), 7);
+});
+
+test('a two-unit limit still emits complete emoji and invalid limits fail promptly', () => {
+  assert.deepEqual(splitTelegramHtml('😀😀x', 2), ['😀', '😀', 'x']);
+  for (const limit of [0, 1, -1, 1.5, NaN, Infinity, TELEGRAM_MESSAGE_LIMIT + 1]) {
+    assert.throws(() => splitTelegramHtml('😀x', limit), RangeError);
+  }
+});
+
+test('boundary newlines, indentation and trailing whitespace survive a full-text roundtrip', () => {
+  const source = 'x'.repeat(3798) + '\n    print("indented")\n';
+  const chunks = splitTelegramHtml(source);
+  assert.equal(chunks.join(''), source);
+  assert.ok(chunks.every((chunk) => chunk.trim().length > 0));
+  assert.ok(chunks.every((chunk) => telegramVisibleLength(chunk) <= TELEGRAM_CHUNK_LIMIT));
+});
+
+test('closing tags at the exact limit do not produce an extra markup-only message', () => {
+  for (const limit of [1024, TELEGRAM_CHUNK_LIMIT]) {
+    const source = `<b><i>${'x'.repeat(limit)}</i></b>`;
+    assert.deepEqual(splitTelegramHtml(source, limit), [source]);
+  }
+});
+
+test('whitespace-only input is omitted and a whitespace tail stays attached to text', () => {
+  for (const source of [' \n\t ', '<b></b>', '<b> \n&#32;&#xA;</b>']) {
+    assert.deepEqual(splitTelegramHtml(source), []);
+  }
+  for (const source of ['xxx  ', 'xxxx\n\n', 'xxxx    y']) {
+    const chunks = splitTelegramHtml(source, 4);
+    assert.equal(chunks.join(''), source);
+    assert.ok(chunks.every((chunk) => chunk.trim().length > 0));
+    assert.ok(chunks.every((chunk) => chunk.length <= 4));
+  }
+});
+
+test('full prompt output and formatted code preserve indentation across chunks', () => {
+  const body = 'instructions\n' + '  - keep this indentation\n'.repeat(250) + '\n    final_line()\n';
+  const header = '<b>Title:</b> Saved prompt\n<b>Prompt Text:</b>\n';
+  const source = `${header}<pre><code>${body}</code></pre>`;
+  const chunks = splitTelegramHtml(source);
+  assert.ok(chunks.length > 1);
+  for (const chunk of chunks) {
+    assertWellFormed(chunk);
+    assert.ok(chunk.replace(TAG_PATTERN, '').trim().length > 0);
+    assert.ok(telegramVisibleLength(chunk) <= TELEGRAM_CHUNK_LIMIT);
+  }
+  assert.equal(chunks.map((chunk) => chunk.replace(TAG_PATTERN, '')).join(''), source.replace(TAG_PATTERN, ''));
 });

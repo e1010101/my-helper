@@ -2,6 +2,12 @@
 
 This guide covers multiple deployment options for your Telegram bot.
 
+Use Node.js 22.13+ (22.x) or Node.js 24+. Before upgrading an existing deployment,
+run `npm run db:migrate` with the updated schema: this adds the original-request
+timestamp to pending confirmations and protects all private tables with RLS and
+service-role grants. Apply the schema before starting the new code. Webhook mode
+requires a valid `WEBHOOK_SECRET`; an unset or invalid secret prevents startup.
+
 ## 🚂 Railway.app (Recommended)
 
 Railway offers the best balance of ease-of-use and cost-effectiveness for personal bots.

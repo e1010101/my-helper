@@ -1,9 +1,13 @@
 import { Telegraf, Context, Markup } from 'telegraf';
-import { promptCommand, promptTextInputHandler, promptPhotoInputHandler, isUserInPromptFlow } from './prompt.js';
+import { promptCommand, promptTextInputHandler, promptPhotoInputHandler, isUserInPromptFlow, cancelPromptFlow } from './prompt.js';
 import { getPromptCommand, getPromptActionHandler } from './getprompt.js';
 import { db, Task } from '../services/database.js';
 import { escapeHtml } from '../utils/telegram-format.js';
+import { splitTelegramHtml } from '../utils/telegram-chunk.js';
 import { renderHelpText } from './catalog.js';
+import type { AssistantStore } from '../services/assistant-store.js';
+import { buildTodoCard, buildReminderCard, taskPreview } from '../utils/task-format.js';
+import { ReminderControls } from './reminder-controls.js';
 
 export { isUserInPromptFlow };
 
@@ -21,7 +25,6 @@ const ADMIN_USER_IDS = (process.env.ADMIN_USER_ID || '')
   .filter((id) => Number.isInteger(id) && id > 0);
 
 const TASK_LIST_LIMIT = 20;
-const MAX_TASK_DESCRIPTION_CHARS = 200;
 
 type TaskField = 'name' | 'description';
 
@@ -32,6 +35,7 @@ interface TaskDraft {
   name?: string;
   description?: string;
   awaiting?: TaskField;
+  saving?: boolean;
 }
 
 const taskDrafts = new Map<number, TaskDraft>();
@@ -53,37 +57,15 @@ function isAdmin(userId: number | undefined): boolean {
 
 /** Telegram rejects messages longer than 4096 characters. */
 function truncate(text: string, maxLength: number): string {
-  return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
+  return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1).replace(/[\uD800-\uDBFF]$/, '')}…`;
 }
 
 /**
- * Renders a task list message plus its toggle keyboard. Task text is escaped
+ * Renders a task list message plus its controls. Task text is escaped
  * because it is user-supplied and the message is sent with parse_mode HTML.
  */
-function buildTaskListPayload(tasks: Task[]) {
-  const lines = tasks.map((task, index) => {
-    const status = task.completed ? '✅' : '⬜';
-    const createdAt = task.created_at
-      ? new Date(task.created_at).toLocaleDateString()
-      : 'unknown date';
-    const description = truncate(task.description ?? '', MAX_TASK_DESCRIPTION_CHARS);
-
-    return `${index + 1}. ${status} [ID: ${task.id}] ${escapeHtml(task.name)}\n   ${escapeHtml(description)}\n   Created: ${createdAt}`;
-  });
-
-  const buttons = tasks.map((task, index) =>
-    Markup.button.callback(`[${index + 1}]`, `task:toggle:${task.id}`)
-  );
-
-  const keyboardRows = [];
-  for (let i = 0; i < buttons.length; i += 5) {
-    keyboardRows.push(buttons.slice(i, i + 5));
-  }
-
-  return {
-    text: `📝 <b>Your Tasks (${tasks.length})</b>\n\n${lines.join('\n\n')}`,
-    reply_markup: Markup.inlineKeyboard(keyboardRows).reply_markup,
-  };
+function buildTaskListPayload(tasks: Task[], timezone: string) {
+  return tasks.map((task) => buildTodoCard(task, timezone));
 }
 
 function parseTaskId(raw: string | undefined): number | null {
@@ -94,25 +76,47 @@ function parseTaskId(raw: string | undefined): number | null {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-export function registerCommands(bot: Telegraf): void {
+interface TaskCommandOptions {
+  getStore: () => AssistantStore;
+  timezone: string;
+}
+
+export function registerCommands(bot: Telegraf, options: TaskCommandOptions): void {
+  const reminderControls = new ReminderControls(options.getStore, options.timezone, (userId) => {
+    taskDrafts.delete(userId);
+    cancelPromptFlow(userId);
+  });
   // Import and register all commands
   bot.command('start', startCommand);
   bot.command('help', helpCommand);
   bot.command('ping', pingCommand);
-  bot.command('task', taskCommand);
-  bot.command('tasks', tasksCommand);
-  bot.command('prompt', promptCommand);
+  bot.command('task', (ctx) => {
+    if (ctx.from && /\s-(create|update)\b/.test(ctx.message.text)) {
+      reminderControls.clearDraft(ctx.from.id);
+      cancelPromptFlow(ctx.from.id);
+    }
+    return taskCommand(ctx, options);
+  });
+  bot.command('tasks', (ctx) => tasksCommand(ctx, options));
+  bot.command('prompt', (ctx) => {
+    if (ctx.from) {
+      taskDrafts.delete(ctx.from.id);
+      reminderControls.clearDraft(ctx.from.id);
+    }
+    return promptCommand(ctx);
+  });
   bot.command('getprompt', getPromptCommand);
   bot.action(/^getprompt:(next|prev)$/, getPromptActionHandler);
-  bot.action(/^task:(set_name|set_description|submit)$/, taskActionCommand);
-  bot.action(/^task:toggle:(\d+)$/, toggleTaskActionCommand);
+  bot.action(/^task:(set_name|set_description|submit|cancel)$/, taskActionCommand);
+  bot.action(/^task:(complete|reopen|toggle):(\d+)$/, (ctx) => setTaskStatusActionCommand(ctx, options));
+  bot.action(/^task:(edit|delete|confirm_delete|cancel_delete):(\d+)$/, (ctx) => taskListActionCommand(ctx, options, reminderControls));
+  bot.action(/^reminder:(edit|delete|confirm_delete|cancel_delete|text|schedule|save|cancel):(\d+)$/, (ctx) => reminderControls.handleAction(ctx));
   // Multi-step form input. Prompt drafts and task drafts are tracked in
   // separate maps, so only one of these handlers consumes the message.
   bot.on('text', async (ctx, next) => {
-    const promptHandled = await promptTextInputHandler(ctx);
-    if (!promptHandled) {
-      await taskTextInputHandler(ctx);
-    }
+    if (await reminderControls.handleText(ctx)) return;
+    if (await taskTextInputHandler(ctx)) return;
+    if (await promptTextInputHandler(ctx)) return;
     await next();
   });
   bot.on('photo', async (ctx, next) => {
@@ -154,18 +158,19 @@ function getTaskFormKeyboard() {
       Markup.button.callback('Name', 'task:set_name'),
       Markup.button.callback('Description', 'task:set_description'),
     ],
-    [Markup.button.callback('Submit', 'task:submit')],
+    [Markup.button.callback('Submit', 'task:submit'), Markup.button.callback('Cancel', 'task:cancel')],
   ]);
 }
 
 function getTaskFormText(draft: TaskDraft): string {
-  const name = draft.name?.trim() ? escapeHtml(draft.name.trim()) : '(not set)';
-  const description = draft.description?.trim() ? escapeHtml(draft.description.trim()) : '(not set)';
+  const name = draft.name?.trim() ? escapeHtml(truncate(draft.name.trim(), 200)) : '(not set)';
+  const description = draft.description?.trim() ? escapeHtml(truncate(draft.description.trim(), 800)) : '(not set)';
   const awaitingText = draft.awaiting
     ? `\n\nWaiting for ${draft.awaiting} input...`
     : '\n\nTap Name or Description to edit, then tap Submit.';
 
-  return `📝 <b>New Task Form</b>\n\n<b>Name:</b> ${name}\n<b>Description:</b> ${description}${awaitingText}`;
+  const title = draft.taskId ? `Edit To-do [ID: ${draft.taskId}]` : 'New Task Form';
+  return `📝 <b>${title}</b>\n\n<b>Name:</b> ${name}\n<b>Description:</b> ${description}${awaitingText}`;
 }
 
 async function renderTaskForm(ctx: Context, userId: number, draft: TaskDraft): Promise<void> {
@@ -190,7 +195,7 @@ async function renderTaskForm(ctx: Context, userId: number, draft: TaskDraft): P
   taskDrafts.set(userId, draft);
 }
 
-async function taskCommand(ctx: Context) {
+async function taskCommand(ctx: Context, options: TaskCommandOptions) {
   const userId = ctx.from?.id;
   const chatId = ctx.chat?.id;
   const text = ctx.message && 'text' in ctx.message ? ctx.message.text : '';
@@ -214,7 +219,7 @@ async function taskCommand(ctx: Context) {
   try {
     if (flag === '-read') {
       if (args[1]?.toLowerCase() === 'all') {
-        await tasksCommand(ctx);
+        await tasksCommand(ctx, options);
         return;
       }
 
@@ -231,14 +236,15 @@ async function taskCommand(ctx: Context) {
 
       const status = task.completed ? '✅ Completed' : '⬜ Pending';
       const createdAt = new Date(task.created_at).toLocaleString();
-      await ctx.reply(
+      const details =
         `📖 <b>Task Details (ID: ${task.id})</b>\n\n` +
         `<b>Name:</b> ${escapeHtml(task.name)}\n` +
         `<b>Description:</b> ${escapeHtml(task.description ?? '')}\n` +
         `<b>Status:</b> ${status}\n` +
-        `<b>Created:</b> ${createdAt}`,
-        { parse_mode: 'HTML' }
-      );
+        `<b>Created:</b> ${createdAt}`;
+      for (const chunk of splitTelegramHtml(details)) {
+        await ctx.reply(chunk, { parse_mode: 'HTML' });
+      }
       return;
     }
 
@@ -292,7 +298,7 @@ async function taskCommand(ctx: Context) {
   }
 }
 
-async function tasksCommand(ctx: Context) {
+async function tasksCommand(ctx: Context, options: TaskCommandOptions) {
   const userId = ctx.from?.id;
 
   if (!userId) {
@@ -300,29 +306,43 @@ async function tasksCommand(ctx: Context) {
     return;
   }
 
-  try {
-    const tasks = await db.getTasksByUser(userId, TASK_LIST_LIMIT);
+  // A cron created through the assistant is a reminder, not a todo. Read both
+  // sources independently so an unavailable table cannot hide the other list.
+  const [tasksResult, remindersResult] = await Promise.allSettled([
+    db.getTasksByUser(userId, TASK_LIST_LIMIT),
+    options.getStore().listReminders(userId),
+  ]);
 
-    if (tasks.length === 0) {
-      await ctx.reply('📝 You have no tasks yet. Use /task -create to create one.');
-      return;
+  if (tasksResult.status === 'fulfilled' && remindersResult.status === 'fulfilled'
+    && tasksResult.value.length === 0 && remindersResult.value.length === 0) {
+    await ctx.reply('📝 You have no todos or active reminders yet. Use /task -create to create a todo, or ask me to set a reminder.');
+    return;
+  }
+
+  if (tasksResult.status === 'fulfilled') {
+    if (tasksResult.value.length > 0) {
+      await ctx.reply(`📝 <b>Your To-dos (${tasksResult.value.length})</b>`, { parse_mode: 'HTML' });
+      for (const { text, reply_markup } of buildTaskListPayload(tasksResult.value, options.timezone)) {
+        await ctx.reply(text, { parse_mode: 'HTML', reply_markup });
+      }
     }
+  } else {
+    console.error('Tasks command error:', tasksResult.reason);
+    await ctx.reply(isMissingTasksTableError(tasksResult.reason)
+      ? '❌ Cannot list todos: database table "tasks" is missing. Run docs/database-schema.sql in Supabase SQL Editor.'
+      : '❌ Failed to fetch todos. Please try again later.');
+  }
 
-    const { text, reply_markup } = buildTaskListPayload(tasks);
-
-    await ctx.reply(text, {
-      parse_mode: 'HTML',
-      reply_markup
-    });
-  } catch (error) {
-    console.error('Tasks command error:', error);
-    if (isMissingTasksTableError(error)) {
-      await ctx.reply(
-        '❌ Cannot list tasks: database table "tasks" is missing. Run docs/database-schema.sql in Supabase SQL Editor.'
-      );
-      return;
+  if (remindersResult.status === 'fulfilled') {
+    const reminders = remindersResult.value;
+    await ctx.reply(`⏰ <b>Active reminders (${reminders.length})</b>`, { parse_mode: 'HTML' });
+    for (const reminder of reminders) {
+      const { text, reply_markup } = buildReminderCard(reminder, options.timezone);
+      await ctx.reply(text, { parse_mode: 'HTML', reply_markup });
     }
-    await ctx.reply('❌ Failed to fetch tasks. Please try again later.');
+  } else {
+    console.error('Tasks reminder list error:', remindersResult.reason);
+    await ctx.reply('❌ Failed to fetch active reminders. Please try again later.');
   }
 }
 
@@ -338,11 +358,21 @@ async function taskActionCommand(ctx: Context) {
     return;
   }
 
-  const existingDraft = taskDrafts.get(userId);
-  const draft: TaskDraft = existingDraft || { chatId: callbackChatId };
-  draft.chatId = callbackChatId;
-  draft.messageId = callbackMessageId;
-  taskDrafts.set(userId, draft);
+  const draft = taskDrafts.get(userId);
+  if (!draft || draft.chatId !== callbackChatId || draft.messageId !== callbackMessageId) {
+    await ctx.answerCbQuery('This form is no longer active. Open /tasks and tap Edit again.', { show_alert: true });
+    return;
+  }
+  if (draft.saving) {
+    await ctx.answerCbQuery('Saving…');
+    return;
+  }
+  if (callbackData === 'task:cancel') {
+    taskDrafts.delete(userId);
+    await ctx.answerCbQuery('Edit cancelled');
+    await ctx.editMessageText('Task form cancelled.', { reply_markup: { inline_keyboard: [] } });
+    return;
+  }
 
   if (callbackData === 'task:set_name' || callbackData === 'task:set_description') {
     draft.awaiting = callbackData === 'task:set_name' ? 'name' : 'description';
@@ -357,47 +387,33 @@ async function taskActionCommand(ctx: Context) {
     return;
   }
 
-  if (!draft.name?.trim() || !draft.description?.trim()) {
+  if (draft.awaiting || !draft.name?.trim() || !draft.description?.trim()) {
     await ctx.answerCbQuery('Please fill in Name and Description before submitting.', {
       show_alert: true,
     });
     return;
   }
 
+  draft.saving = true;
+  const name = draft.name.trim();
+  const description = draft.description.trim();
+  let confirmation: string;
+
   try {
-    const name = draft.name.trim();
-    const description = draft.description.trim();
-
-    let confirmation: string;
-
     if (draft.taskId) {
+      if (!await db.getTask(draft.taskId, userId)) {
+        taskDrafts.delete(userId);
+        await ctx.answerCbQuery('This to-do no longer exists.', { show_alert: true });
+        return;
+      }
       await db.updateTask(draft.taskId, userId, name, description);
-      confirmation = `✏️ <b>Task (ID: ${draft.taskId}) updated!</b>\n\n<b>Name:</b> ${escapeHtml(name)}\n<b>Description:</b> ${escapeHtml(description)}`;
+      confirmation = `✏️ <b>Task (ID: ${draft.taskId}) updated!</b>\n\n<b>Name:</b> ${taskPreview(name, 200)}\n<b>Description:</b> ${taskPreview(description)}`;
     } else {
       await db.createTask(userId, name, description);
-      confirmation = `✅ <b>Task created!</b>\n\n<b>Name:</b> ${escapeHtml(name)}\n<b>Description:</b> ${escapeHtml(description)}`;
-    }
-
-    try {
-      if (draft.messageId) {
-        await ctx.telegram.editMessageText(draft.chatId, draft.messageId, undefined, confirmation, {
-          parse_mode: 'HTML',
-        });
-      } else {
-        await ctx.reply(confirmation, { parse_mode: 'HTML' });
-      }
-    } catch (error) {
-      console.error('Error updating task confirmation message:', error);
-      await ctx.reply(confirmation, { parse_mode: 'HTML' });
-    }
-
-    taskDrafts.delete(userId);
-    try {
-      await ctx.answerCbQuery('Task saved');
-    } catch (callbackError) {
-      console.warn('Task saved but failed to answer callback query:', callbackError);
+      confirmation = `✅ <b>Task created!</b>\n\n<b>Name:</b> ${taskPreview(name, 200)}\n<b>Description:</b> ${taskPreview(description)}`;
     }
   } catch (error) {
+    draft.saving = false;
     console.error('Task submit error:', error);
     const missingTasksTable = isMissingTasksTableError(error);
     try {
@@ -415,13 +431,40 @@ async function taskActionCommand(ctx: Context) {
       return;
     }
     await ctx.reply('❌ Failed to save task. Please try again later.');
+    return;
+  }
+
+  // Once persistence succeeds, this draft must never be submitted again even
+  // if Telegram cannot deliver either the edited card or its fallback reply.
+  if (taskDrafts.get(userId) === draft) taskDrafts.delete(userId);
+  try {
+    if (draft.messageId) {
+      await ctx.telegram.editMessageText(draft.chatId, draft.messageId, undefined, confirmation, {
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [] },
+      });
+    } else {
+      await ctx.reply(confirmation, { parse_mode: 'HTML' });
+    }
+  } catch (error) {
+    console.error('Task saved but confirmation message failed:', error);
+    await ctx.reply(confirmation, { parse_mode: 'HTML' }).catch((replyError) => {
+      console.warn('Task saved but fallback confirmation failed:', replyError);
+    });
+  }
+  try {
+    await ctx.answerCbQuery('Task saved');
+  } catch (callbackError) {
+    console.warn('Task saved but failed to answer callback query:', callbackError);
   }
 }
 
-async function toggleTaskActionCommand(ctx: Context) {
+async function setTaskStatusActionCommand(ctx: Context, options: TaskCommandOptions) {
   const userId = ctx.from?.id;
   const callbackData = ctx.callbackQuery && 'data' in ctx.callbackQuery ? ctx.callbackQuery.data : '';
-  // Payload shape is enforced by the registration regex ^task:toggle:(\d+)$
+  // Older cards used a toggle without a target state. Refresh those cards so
+  // a stale "Complete" button cannot accidentally reopen a completed task.
+  const action = callbackData.split(':')[1];
   const taskId = parseTaskId(callbackData.split(':')[2]);
 
   if (!userId || taskId === null) {
@@ -436,12 +479,12 @@ async function toggleTaskActionCommand(ctx: Context) {
       return;
     }
 
-    const newStatus = !task.completed;
-    await db.updateTaskStatus(taskId, userId, newStatus);
+    const newStatus = action === 'toggle' ? task.completed : action === 'complete';
+    if (newStatus !== task.completed) {
+      await db.updateTaskStatus(taskId, userId, newStatus);
+    }
 
-    // Fetch refreshed tasks list
-    const tasks = await db.getTasksByUser(userId, TASK_LIST_LIMIT);
-    const { text, reply_markup } = buildTaskListPayload(tasks);
+    const { text, reply_markup } = buildTodoCard({ ...task, completed: newStatus }, options.timezone);
 
     if (ctx.callbackQuery?.message && 'chat' in ctx.callbackQuery.message) {
       await ctx.telegram.editMessageText(
@@ -450,27 +493,35 @@ async function toggleTaskActionCommand(ctx: Context) {
         undefined,
         text,
         { parse_mode: 'HTML', reply_markup }
-      );
+      ).catch((error: unknown) => {
+        if (!/message is not modified/i.test(String(error))) throw error;
+      });
     }
 
-    await ctx.answerCbQuery(`Task marked as ${newStatus ? 'completed' : 'uncompleted'}`);
+    await ctx.answerCbQuery(action === 'toggle'
+      ? 'Card refreshed. Tap Complete or Reopen.'
+      : `Task marked as ${newStatus ? 'completed' : 'uncompleted'}`);
   } catch (error) {
-    console.error('Toggle task error:', error);
+    console.error('Task status update error:', error);
     await ctx.answerCbQuery('Failed to update task', { show_alert: true });
   }
 }
 
-async function taskTextInputHandler(ctx: Context) {
+async function taskTextInputHandler(ctx: Context): Promise<boolean> {
   const userId = ctx.from?.id;
   const text = ctx.message && 'text' in ctx.message ? ctx.message.text.trim() : '';
 
   if (!userId || !text || text.startsWith('/')) {
-    return;
+    return false;
   }
 
   const draft = taskDrafts.get(userId);
-  if (!draft || !draft.awaiting) {
-    return;
+  if (!draft || ctx.chat?.id !== draft.chatId) {
+    return false;
+  }
+  if (draft.saving || !draft.awaiting) {
+    await ctx.reply('Use the Name or Description button to choose a field, or tap Submit / Cancel.');
+    return true;
   }
 
   const updatedField: TaskField = draft.awaiting;
@@ -483,6 +534,49 @@ async function taskTextInputHandler(ctx: Context) {
   draft.awaiting = undefined;
   taskDrafts.set(userId, draft);
   await renderTaskForm(ctx, userId, draft);
+  return true;
+}
+
+async function taskListActionCommand(ctx: Context, options: TaskCommandOptions, reminderControls: ReminderControls): Promise<void> {
+  const data = ctx.callbackQuery && 'data' in ctx.callbackQuery ? ctx.callbackQuery.data : '';
+  const match = /^task:(edit|delete|confirm_delete|cancel_delete):(\d+)$/.exec(data);
+  const userId = ctx.from?.id;
+  const taskId = Number(match?.[2]);
+  if (!match || !userId || !ctx.chat || !Number.isSafeInteger(taskId) || taskId < 1) {
+    await ctx.answerCbQuery('Invalid task ID', { show_alert: true });
+    return;
+  }
+  try {
+    const task = await db.getTask(taskId, userId);
+    if (!task) {
+      await ctx.answerCbQuery('Task not found', { show_alert: true });
+      return;
+    }
+    await ctx.answerCbQuery();
+    if (match[1] === 'edit') {
+      reminderControls.clearDraft(userId);
+      cancelPromptFlow(userId);
+      const draft: TaskDraft = { chatId: ctx.chat.id, taskId: task.id, name: task.name, description: task.description };
+      taskDrafts.set(userId, draft);
+      await renderTaskForm(ctx, userId, draft);
+    } else if (match[1] === 'delete') {
+      await ctx.editMessageText(`🗑 <b>Delete To-do [ID: ${taskId}]?</b>\n\n${taskPreview(task.name, 200)}`, {
+        parse_mode: 'HTML', reply_markup: Markup.inlineKeyboard([
+          [Markup.button.callback('Confirm delete', `task:confirm_delete:${taskId}`), Markup.button.callback('Keep to-do', `task:cancel_delete:${taskId}`)],
+        ]).reply_markup,
+      });
+    } else if (match[1] === 'confirm_delete') {
+      await db.deleteTask(taskId, userId);
+      if (taskDrafts.get(userId)?.taskId === taskId) taskDrafts.delete(userId);
+      await ctx.editMessageText(`🗑 To-do [ID: ${taskId}] deleted.`, { reply_markup: { inline_keyboard: [] } });
+    } else {
+      const card = buildTodoCard(task, options.timezone);
+      await ctx.editMessageText(card.text, { parse_mode: 'HTML', reply_markup: card.reply_markup });
+    }
+  } catch (error) {
+    console.error('Task list action error:', error);
+    await ctx.reply('❌ Could not update this to-do. Please try again.');
+  }
 }
 
 async function statusCommand(ctx: Context) {

@@ -26,6 +26,9 @@ export const TELEGRAM_CHUNK_LIMIT = 3800;
 
 const TAG_PATTERN = /^<(\/?)([a-zA-Z][a-zA-Z0-9-]*)((?:"[^"]*"|'[^']*'|[^>])*)>/;
 const ENTITY_PATTERN = /^&(?:#\d{1,7}|#x[0-9a-fA-F]{1,6}|[a-zA-Z][a-zA-Z0-9]{1,31});/;
+const ALL_TAGS = new RegExp(TAG_PATTERN.source.slice(1), 'g');
+const ALL_ENTITIES = new RegExp(ENTITY_PATTERN.source.slice(1), 'g');
+const NAMED_ENTITY_VALUES: Record<string, string> = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"' };
 
 interface OpenTag {
   name: string;
@@ -61,6 +64,16 @@ function cloneOpen(open: OpenTag[]): OpenTag[] {
   return open.map((entry) => ({ ...entry }));
 }
 
+function decodedCharacter(raw: string): string {
+  if (!raw.startsWith('&')) return raw;
+  const numeric = /^&#(x[0-9a-f]+|\d+);$/i.exec(raw);
+  if (!numeric) return NAMED_ENTITY_VALUES[raw] ?? '\ufffd';
+  const point = numeric[1][0].toLowerCase() === 'x'
+    ? Number.parseInt(numeric[1].slice(1), 16)
+    : Number.parseInt(numeric[1], 10);
+  return point <= 0x10ffff ? String.fromCodePoint(point) : '\ufffd';
+}
+
 /**
  * Walks `html` from `from`, emitting at most `maxVisible` visible characters,
  * and records every legal cut position along the way.
@@ -77,7 +90,7 @@ function scan(html: string, from: { html: number; visible: number; open: OpenTag
     candidates.push({ html: htmlAt, visible, open: cloneOpen(open), rank });
   };
 
-  while (htmlAt < html.length && emitted < maxVisible) {
+  while (htmlAt < html.length) {
     const rest = html.slice(htmlAt);
 
     const tag = TAG_PATTERN.exec(rest);
@@ -96,10 +109,12 @@ function scan(html: string, from: { html: number; visible: number; open: OpenTag
     }
 
     const entity = ENTITY_PATTERN.exec(rest);
-    const raw = entity ? entity[0] : html[htmlAt];
+    const raw = entity ? entity[0] : String.fromCodePoint(html.codePointAt(htmlAt)!);
+    const width = decodedCharacter(raw).length;
+    if (emitted + width > maxVisible) break;
     htmlAt += raw.length;
-    visible += 1;
-    emitted += 1;
+    visible += width;
+    emitted += width;
 
     // A cut is legal immediately after any complete character.
     if (/\n/.test(raw)) {
@@ -119,6 +134,11 @@ function scan(html: string, from: { html: number; visible: number; open: OpenTag
     candidates,
     emitted,
   };
+}
+
+/** Counts parsed text without markup, using the same limits as the splitter. */
+export function telegramVisibleLength(html: string): number {
+  return scan(html, { html: 0, visible: 0, open: [] }, Number.POSITIVE_INFINITY).emitted;
 }
 
 /**
@@ -154,7 +174,13 @@ export function splitTelegramHtml(
   html: string,
   limit: number = TELEGRAM_CHUNK_LIMIT
 ): string[] {
-  if (html.length === 0) {
+  if (!Number.isInteger(limit) || limit < 2 || limit > TELEGRAM_MESSAGE_LIMIT) {
+    throw new RangeError(`Telegram chunk limit must be an integer from 2 to ${TELEGRAM_MESSAGE_LIMIT}`);
+  }
+  const plainText = html.replace(ALL_TAGS, '').replace(ALL_ENTITIES, decodedCharacter);
+  // Telegram rejects messages containing no text, including markup-only and
+  // whitespace-only payloads. There is nothing useful to send for those inputs.
+  if (plainText.trim().length === 0) {
     return [];
   }
 
@@ -169,45 +195,44 @@ export function splitTelegramHtml(
     // Whole remainder fits: emit it, reopening any carried formatting.
     if (scanEnd.done) {
       const prefix = carried.map((entry) => entry.opening).join('');
-      const text = html.slice(cursor.html).trim();
-      if (text.length > 0) {
-        chunks.push(`${prefix}${text}`);
-      }
+      chunks.push(`${prefix}${html.slice(cursor.html)}`);
       break;
     }
 
-    const cut = pickBreak(scanEnd.candidates);
+    const firstText = cursor.visible + plainText.slice(cursor.visible).search(/\S/);
+    const candidates = scanEnd.candidates.filter((candidate) => candidate.visible > firstText);
+    let usable = pickBreak(candidates);
 
-    // Only cut where a visible character actually ended; anything else would
-    // either drop text or cut through a tag.
-    const usable = cut && cut.visible > cursor.visible ? cut : undefined;
+    // Leave a non-whitespace character reachable in the following chunk. In
+    // particular, keep trailing newlines/indentation with the final text rather
+    // than emitting an empty message or trimming part of the saved content.
+    const canStartNextChunk = (candidate: BreakPoint) => {
+      const rest = plainText.slice(candidate.visible);
+      const nextText = rest.search(/\S/);
+      if (nextText < 0) return false;
+      return nextText + String.fromCodePoint(rest.codePointAt(nextText)!).length <= limit;
+    };
+    if (usable && !canStartNextChunk(usable)) {
+      usable = [...candidates].reverse().find(canStartNextChunk);
+    }
 
     if (!usable) {
-      // No legal break in this window. Emit what was scanned, closing whatever
-      // it left open, so the loop always advances.
-      const prefix = carried.map((entry) => entry.opening).join('');
-      const closing = [...scanEnd.open].reverse().map((entry) => `</${entry.name}>`).join('');
-      const text = html.slice(cursor.html, scanEnd.html).trim();
-      if (text.length > 0) {
-        chunks.push(`${prefix}${text}${closing}`);
-      }
-      cursor = { html: scanEnd.html, visible: scanEnd.visible, open: scanEnd.open };
-      carried = scanEnd.open;
-      continue;
+      // An over-limit run with no text cannot be sent without either changing
+      // the content or sending a whitespace-only message, which Telegram
+      // rejects. Fail explicitly instead of silently losing saved text.
+      throw new RangeError('Cannot split this whitespace span without changing the message');
     }
 
     const prefix = carried.map((entry) => entry.opening).join('');
     const closing = [...usable.open].reverse().map((entry) => `</${entry.name}>`).join('');
-    const text = html.slice(cursor.html, usable.html).trim();
+    const text = html.slice(cursor.html, usable.html);
 
     if (usable.html <= cursor.html) {
       // Defensive: never loop without advancing.
       break;
     }
 
-    if (text.length > 0) {
-      chunks.push(`${prefix}${text}${closing}`);
-    }
+    chunks.push(`${prefix}${text}${closing}`);
 
     cursor = { html: usable.html, visible: usable.visible, open: usable.open };
     carried = usable.open;

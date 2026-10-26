@@ -64,29 +64,6 @@ CREATE INDEX IF NOT EXISTS idx_prompts_created_at ON prompts(created_at DESC);
 -- GIN index supports the tag containment filter used by /getprompt -tag
 CREATE INDEX IF NOT EXISTS idx_prompts_tags ON prompts USING GIN(tags);
 
--- Optional: Enable Row Level Security (RLS) for better security
--- Uncomment if you want to enable RLS (recommended for production)
-
--- ALTER TABLE user_data ENABLE ROW LEVEL SECURITY;
--- ALTER TABLE command_history ENABLE ROW LEVEL SECURITY;
-
--- Create policies (adjust based on your security needs)
--- These policies allow service role (your bot) to access all data
-
--- CREATE POLICY "Service role can access all user_data"
---   ON user_data
---   FOR ALL
---   TO service_role
---   USING (true)
---   WITH CHECK (true);
-
--- CREATE POLICY "Service role can access all command_history"
---   ON command_history
---   FOR ALL
---   TO service_role
---   USING (true)
---   WITH CHECK (true);
-
 -- Optional: Create a function to automatically update the updated_at timestamp
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
@@ -191,6 +168,11 @@ CREATE TABLE IF NOT EXISTS pending_actions (
   expires_at TIMESTAMP WITH TIME ZONE NOT NULL
 );
 
+-- Original user request time is distinct from when model processing completed.
+-- Nullable for rolling upgrades; old confirmations use created_at as a fallback.
+ALTER TABLE pending_actions ADD COLUMN IF NOT EXISTS requested_at TIMESTAMP WITH TIME ZONE;
+UPDATE pending_actions SET requested_at = created_at WHERE requested_at IS NULL;
+
 COMMENT ON TABLE pending_actions IS 'Write-tool confirmations awaiting a user tap';
 
 CREATE INDEX IF NOT EXISTS idx_pending_actions_expires_at ON pending_actions(expires_at);
@@ -255,6 +237,7 @@ COMMENT ON TABLE token_usage IS 'Per-call token accounting, for watching prompt 
 
 -- The reporting query: recent usage for one user, newest first.
 CREATE INDEX IF NOT EXISTS idx_token_usage_user_created ON token_usage(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_token_usage_user_id_cursor ON token_usage(user_id, id);
 
 -- ============================================================
 -- Row Level Security
@@ -264,6 +247,10 @@ CREATE INDEX IF NOT EXISTS idx_token_usage_user_created ON token_usage(user_id, 
 -- which bypasses RLS. Explicit policies document that intent and mean the same
 -- migration also works on a project where RLS was already enabled by hand.
 
+ALTER TABLE user_data ENABLE ROW LEVEL SECURITY;
+ALTER TABLE command_history ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE prompts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE facts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE reminders ENABLE ROW LEVEL SECURITY;
@@ -275,6 +262,8 @@ ALTER TABLE token_usage ENABLE ROW LEVEL SECURITY;
 DO $$
 DECLARE
   target TEXT;
+  client_role TEXT;
+  sequence_name TEXT;
 BEGIN
   -- The service_role is created by Supabase. A plain Postgres instance (used
   -- for local testing) will not have it, so skip policy creation there rather
@@ -285,8 +274,30 @@ BEGIN
     RETURN;
   END IF;
 
-  FOREACH target IN ARRAY ARRAY['conversations', 'facts', 'reminders', 'pending_actions', 'credentials', 'health_probes', 'token_usage']
+  GRANT USAGE ON SCHEMA public TO service_role;
+
+  FOREACH target IN ARRAY ARRAY['user_data', 'command_history', 'tasks', 'prompts', 'conversations', 'facts', 'reminders', 'pending_actions', 'credentials', 'health_probes', 'token_usage']
   LOOP
+    -- The bot enforces Telegram ownership with a server-only service key.
+    -- Remove legacy API grants as well as enabling RLS so an old permissive
+    -- policy cannot accidentally reopen private data during this upgrade.
+    EXECUTE format('REVOKE ALL ON TABLE public.%I FROM PUBLIC', target);
+    FOR client_role IN SELECT rolname FROM pg_roles WHERE rolname IN ('anon', 'authenticated')
+    LOOP
+      EXECUTE format('REVOKE ALL ON TABLE public.%I FROM %I', target, client_role);
+    END LOOP;
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO service_role', target);
+
+    sequence_name := CASE WHEN target = 'user_data' THEN NULL ELSE pg_get_serial_sequence(format('public.%I', target), 'id') END;
+    IF sequence_name IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON SEQUENCE %s FROM PUBLIC', sequence_name);
+      FOR client_role IN SELECT rolname FROM pg_roles WHERE rolname IN ('anon', 'authenticated')
+      LOOP
+        EXECUTE format('REVOKE ALL ON SEQUENCE %s FROM %I', sequence_name, client_role);
+      END LOOP;
+      EXECUTE format('GRANT USAGE, SELECT ON SEQUENCE %s TO service_role', sequence_name);
+    END IF;
+
     -- CREATE POLICY has no IF NOT EXISTS, so a duplicate is swallowed by name.
     -- That keeps this file safe to re-run, which matters because it is applied
     -- as a whole script.
@@ -306,4 +317,4 @@ END $$;
 -- SELECT * FROM user_data LIMIT 5;
 -- SELECT * FROM command_history ORDER BY created_at DESC LIMIT 10;
 -- SELECT id, title, tags FROM prompts ORDER BY created_at DESC LIMIT 10;
--- SELECT relname, relrowsecurity FROM pg_class WHERE relname IN ('conversations','facts','reminders','pending_actions','credentials','health_probes');
+-- SELECT relname, relrowsecurity FROM pg_class WHERE relname IN ('user_data','command_history','tasks','prompts','conversations','facts','reminders','pending_actions','credentials','health_probes','token_usage');

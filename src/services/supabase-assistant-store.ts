@@ -1,6 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { db } from './database.js';
-import { groupUsageByDay } from './token-usage.js';
+import { localDateKey } from './token-usage.js';
 import type { AssistantStore } from './assistant-store.js';
 import type {
   ConversationMessage,
@@ -12,16 +12,13 @@ import type {
   PendingActionRecord,
   Reminder,
   ReminderFrequency,
+  ReminderUpdate,
   TokenUsageRecord,
   TokenUsageSummary,
 } from '../types/assistant.js';
 
-/**
- * Upper bound on rows read for a usage summary. A month of heavy use is well
- * under this; the cap exists so a pathological window cannot pull unbounded
- * data into memory.
- */
-const MAX_USAGE_ROWS = 5000;
+/** Page size only: reports keep reading until the captured window is exhausted. */
+const USAGE_PAGE_SIZE = 1000;
 
 interface MessageRow {
   id: number;
@@ -58,8 +55,31 @@ interface PendingActionRow {
   tool_name: string;
   args: unknown;
   model_parts: unknown;
+  requested_at?: string | null;
   created_at: string;
   expires_at: string;
+}
+
+interface UsageRow {
+  id: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cached_tokens: number;
+  system_tokens: number;
+  tools_tokens: number;
+  messages_tokens: number;
+  created_at: string;
+}
+
+function toPendingAction(row: PendingActionRow): PendingActionRecord {
+  return {
+    id: row.id, userId: row.user_id, toolName: row.tool_name,
+    args: (row.args ?? {}) as Record<string, unknown>,
+    modelParts: (row.model_parts ?? []) as unknown[],
+    requestedAt: row.requested_at ?? row.created_at,
+    createdAt: row.created_at, expiresAt: row.expires_at,
+  };
 }
 
 function toMessage(row: MessageRow): ConversationMessage {
@@ -305,26 +325,51 @@ export class SupabaseAssistantStore implements AssistantStore {
     return (data as ReminderRow[]).map(toReminder);
   }
 
-  async markReminderSent(id: number, nextRunAt: string, sentAt: string): Promise<void> {
-    const { error } = await this.client
-      .from('reminders')
-      .update({ next_run_at: nextRunAt, last_sent_at: sentAt })
-      .eq('id', id);
-
-    if (error) {
-      throw new Error(`Failed to record reminder delivery: ${error.message}`);
-    }
+  async getReminder(id: number, userId: number): Promise<Reminder | null> {
+    const { data, error } = await this.client.from('reminders').select('*')
+      .eq('id', id).eq('user_id', userId).eq('active', true).maybeSingle();
+    if (error) throw new Error(`Failed to read reminder: ${error.message}`);
+    return data ? toReminder(data as ReminderRow) : null;
   }
 
-  async completeReminder(id: number, sentAt: string): Promise<void> {
-    const { error } = await this.client
-      .from('reminders')
-      .update({ active: false, last_sent_at: sentAt })
-      .eq('id', id);
+  async updateReminder(id: number, userId: number, update: ReminderUpdate): Promise<Reminder | null> {
+    // Do not write a stale next_run_at back after a text-only edit: the
+    // scheduler may have advanced it since the user opened the form.
+    const patch = {
+      text: update.text,
+      ...(update.schedule ? {
+        next_run_at: update.schedule.nextRunAt,
+        frequency: update.schedule.frequency,
+        time_of_day: update.schedule.timeOfDay ?? null,
+        day_of_week: update.schedule.dayOfWeek ?? null,
+        day_of_month: update.schedule.dayOfMonth ?? null,
+      } : {}),
+    };
+    const { data, error } = await this.client.from('reminders').update(patch)
+      .eq('id', id).eq('user_id', userId).eq('active', true).select('*').maybeSingle();
+    if (error) throw new Error(`Failed to update reminder: ${error.message}`);
+    return data ? toReminder(data as ReminderRow) : null;
+  }
 
-    if (error) {
-      throw new Error(`Failed to complete reminder: ${error.message}`);
+  private async updateDeliveredOccurrence(id: number, patch: Record<string, unknown>, expected: Reminder): Promise<void> {
+    let query = this.client.from('reminders').update(patch).eq('id', id).eq('active', true);
+    query = query.eq('user_id', expected.userId).eq('next_run_at', expected.nextRunAt)
+      .eq('frequency', expected.frequency);
+    for (const [column, value] of [
+      ['time_of_day', expected.timeOfDay], ['day_of_week', expected.dayOfWeek], ['day_of_month', expected.dayOfMonth],
+    ] as const) {
+      query = value === null ? query.is(column, null) : query.eq(column, value);
     }
+    const { error } = await query;
+    if (error) throw new Error(`Failed to record reminder delivery: ${error.message}`);
+  }
+
+  async markReminderSent(id: number, nextRunAt: string, sentAt: string, expected: Reminder): Promise<void> {
+    await this.updateDeliveredOccurrence(id, { next_run_at: nextRunAt, last_sent_at: sentAt }, expected);
+  }
+
+  async completeReminder(id: number, sentAt: string, expected: Reminder): Promise<void> {
+    await this.updateDeliveredOccurrence(id, { active: false, last_sent_at: sentAt }, expected);
   }
 
   async cancelReminder(id: number, userId: number): Promise<boolean> {
@@ -353,6 +398,7 @@ export class SupabaseAssistantStore implements AssistantStore {
         tool_name: action.toolName,
         args: action.args,
         model_parts: action.modelParts,
+        requested_at: action.requestedAt ?? new Date().toISOString(),
         expires_at: action.expiresAt,
       })
       .select('*')
@@ -362,16 +408,7 @@ export class SupabaseAssistantStore implements AssistantStore {
       throw new Error(`Failed to store pending action: ${error.message}`);
     }
 
-    const row = data as PendingActionRow;
-    return {
-      id: row.id,
-      userId: row.user_id,
-      toolName: row.tool_name,
-      args: (row.args ?? {}) as Record<string, unknown>,
-      modelParts: (row.model_parts ?? []) as unknown[],
-      createdAt: row.created_at,
-      expiresAt: row.expires_at,
-    };
+    return toPendingAction(data as PendingActionRow);
   }
 
   async getPendingAction(id: number, userId: number): Promise<PendingActionRecord | null> {
@@ -390,16 +427,16 @@ export class SupabaseAssistantStore implements AssistantStore {
       return null;
     }
 
-    const row = data as PendingActionRow;
-    return {
-      id: row.id,
-      userId: row.user_id,
-      toolName: row.tool_name,
-      args: (row.args ?? {}) as Record<string, unknown>,
-      modelParts: (row.model_parts ?? []) as unknown[],
-      createdAt: row.created_at,
-      expiresAt: row.expires_at,
-    };
+    return toPendingAction(data as PendingActionRow);
+  }
+
+  async consumePendingAction(id: number, userId: number): Promise<PendingActionRecord | null> {
+    // PostgreSQL row locking makes DELETE RETURNING a one-winner claim even
+    // when two application instances handle the same confirmation at once.
+    const { data, error } = await this.client.from('pending_actions').delete()
+      .eq('id', id).eq('user_id', userId).select('*').maybeSingle();
+    if (error) throw new Error(`Failed to claim pending action: ${error.message}`);
+    return data ? toPendingAction(data as PendingActionRow) : null;
   }
 
   async deletePendingAction(id: number): Promise<void> {
@@ -444,106 +481,83 @@ export class SupabaseAssistantStore implements AssistantStore {
   }
 
   /**
-   * Aggregates in the database rather than fetching rows: this table grows by
-   * one row per model call, so pulling a window into memory would get slower
-   * every month. PostgREST exposes no aggregate functions, so the window is
-   * fetched column-limited and summed here — bounded by the window rather than
-   * by total history.
+   * Read a stable ID-bounded snapshot in keyset pages. A server can return fewer
+   * rows than requested; only an empty page or reaching the captured maximum
+   * ends the report. New calls cannot make a long report chase a moving tail.
    */
-  async summariseTokenUsage(userId: number, since: Date): Promise<TokenUsageSummary> {
-    const { data, error } = await this.client
-      .from('token_usage')
-      .select('prompt_tokens, completion_tokens, total_tokens, cached_tokens, created_at')
-      .eq('user_id', userId)
-      .gte('created_at', since.toISOString())
-      .order('created_at', { ascending: true })
-      .limit(MAX_USAGE_ROWS);
-
-    if (error) {
-      throw new Error(`Failed to summarise token usage: ${error.message}`);
+  private async *usagePages(userId: number, since: Date): AsyncGenerator<UsageRow[]> {
+    const { data: newest, error: newestError } = await this.client.from('token_usage')
+      .select('id').eq('user_id', userId).gte('created_at', since.toISOString())
+      .order('id', { ascending: false }).limit(1).maybeSingle();
+    if (newestError) throw new Error(`Failed to load token usage: ${newestError.message}`);
+    if (!newest) return;
+    const upperId = Number(newest.id);
+    let afterId = 0;
+    while (afterId < upperId) {
+      const { data, error } = await this.client.from('token_usage')
+        .select('id, prompt_tokens, completion_tokens, total_tokens, cached_tokens, system_tokens, tools_tokens, messages_tokens, created_at')
+        .eq('user_id', userId).gte('created_at', since.toISOString())
+        .gt('id', afterId).lte('id', upperId).order('id', { ascending: true }).limit(USAGE_PAGE_SIZE);
+      if (error) throw new Error(`Failed to load token usage: ${error.message}`);
+      const rows = (data ?? []) as UsageRow[];
+      if (rows.length === 0) return;
+      const nextId = Number(rows[rows.length - 1].id);
+      if (nextId <= afterId) throw new Error('Token usage pagination did not advance');
+      yield rows;
+      afterId = nextId;
     }
-
-    const rows = (data ?? []) as {
-      prompt_tokens: number;
-      completion_tokens: number;
-      total_tokens: number;
-      cached_tokens: number;
-      created_at: string;
-    }[];
-
-    if (rows.length === 0) {
-      return {
-        calls: 0,
-        promptTokens: 0,
-        completionTokens: 0,
-        totalTokens: 0,
-        cachedTokens: 0,
-        averagePromptTokens: 0,
-        firstRecordedAt: null,
-        lastRecordedAt: null,
-      };
-    }
-
-    const sum = (pick: (row: (typeof rows)[number]) => number) =>
-      rows.reduce((total, row) => total + (pick(row) ?? 0), 0);
-
-    const promptTokens = sum((row) => row.prompt_tokens);
-
-    return {
-      calls: rows.length,
-      promptTokens,
-      completionTokens: sum((row) => row.completion_tokens),
-      totalTokens: sum((row) => row.total_tokens),
-      cachedTokens: sum((row) => row.cached_tokens),
-      averagePromptTokens: Math.round(promptTokens / rows.length),
-      firstRecordedAt: rows[0].created_at,
-      lastRecordedAt: rows[rows.length - 1].created_at,
-    };
   }
 
-  /**
-   * Per-day aggregates. The window is bounded by `days` and MAX_USAGE_ROWS, so
-   * this stays cheap as history grows; bucketing happens in groupUsageByDay so
-   * the same "day" definition is used here and by the in-memory store.
-   */
+  async summariseTokenUsage(userId: number, since: Date): Promise<TokenUsageSummary> {
+    const summary: TokenUsageSummary = {
+      calls: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0,
+      averagePromptTokens: 0, firstRecordedAt: null, lastRecordedAt: null,
+    };
+    for await (const rows of this.usagePages(userId, since)) {
+      for (const row of rows) {
+        summary.calls += 1;
+        summary.promptTokens += row.prompt_tokens ?? 0;
+        summary.completionTokens += row.completion_tokens ?? 0;
+        summary.totalTokens += row.total_tokens ?? 0;
+        summary.cachedTokens += row.cached_tokens ?? 0;
+        if (summary.firstRecordedAt === null || row.created_at < summary.firstRecordedAt) summary.firstRecordedAt = row.created_at;
+        if (summary.lastRecordedAt === null || row.created_at > summary.lastRecordedAt) summary.lastRecordedAt = row.created_at;
+      }
+    }
+    summary.averagePromptTokens = summary.calls ? Math.round(summary.promptTokens / summary.calls) : 0;
+    return summary;
+  }
+
   async dailyTokenUsage(userId: number, days: number, timezone: string): Promise<DailyTokenUsage[]> {
     const since = new Date(Date.now() - days * 86_400_000);
-
-    const { data, error } = await this.client
-      .from('token_usage')
-      .select('prompt_tokens, completion_tokens, total_tokens, cached_tokens, system_tokens, tools_tokens, messages_tokens, created_at')
-      .eq('user_id', userId)
-      .gte('created_at', since.toISOString())
-      .order('created_at', { ascending: true })
-      .limit(MAX_USAGE_ROWS);
-
-    if (error) {
-      throw new Error(`Failed to load daily token usage: ${error.message}`);
+    const buckets = new Map<string, {
+      calls: number; prompt: number; completion: number; total: number; cached: number;
+      system: number; tools: number; messages: number;
+    }>();
+    for await (const rows of this.usagePages(userId, since)) {
+      for (const row of rows) {
+        const date = new Date(row.created_at);
+        if (Number.isNaN(date.getTime())) continue;
+        const key = localDateKey(date, timezone);
+        const day = buckets.get(key) ?? { calls: 0, prompt: 0, completion: 0, total: 0, cached: 0, system: 0, tools: 0, messages: 0 };
+        day.calls += 1;
+        day.prompt += row.prompt_tokens ?? 0;
+        day.completion += row.completion_tokens ?? 0;
+        day.total += row.total_tokens ?? 0;
+        day.cached += row.cached_tokens ?? 0;
+        day.system += row.system_tokens ?? 0;
+        day.tools += row.tools_tokens ?? 0;
+        day.messages += row.messages_tokens ?? 0;
+        buckets.set(key, day);
+      }
     }
-
-    const rows = (data ?? []) as {
-      prompt_tokens: number;
-      completion_tokens: number;
-      total_tokens: number;
-      cached_tokens: number;
-      system_tokens: number;
-      tools_tokens: number;
-      messages_tokens: number;
-      created_at: string;
-    }[];
-
-    return groupUsageByDay(
-      rows.map((row) => ({
-        createdAt: row.created_at,
-        promptTokens: row.prompt_tokens,
-        completionTokens: row.completion_tokens,
-        totalTokens: row.total_tokens,
-        cachedTokens: row.cached_tokens,
-        systemTokens: row.system_tokens,
-        toolsTokens: row.tools_tokens,
-        messagesTokens: row.messages_tokens,
-      })),
-      timezone
-    );
+    return [...buckets.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([date, day]) => ({
+      date, calls: day.calls, promptTokens: day.prompt, completionTokens: day.completion,
+      totalTokens: day.total, cachedTokens: day.cached,
+      averagePromptTokens: Math.round(day.prompt / day.calls),
+      averageSystemTokens: Math.round(day.system / day.calls),
+      averageToolsTokens: Math.round(day.tools / day.calls),
+      averageMessagesTokens: Math.round(day.messages / day.calls),
+    }));
   }
 }

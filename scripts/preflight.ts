@@ -79,6 +79,14 @@ for (const key of REQUIRED) {
 
 // --- Provider configuration ------------------------------------------------
 
+if (process.env.WEBHOOK_DOMAIN?.trim()) {
+  const secret = process.env.WEBHOOK_SECRET?.trim();
+  record('Webhook secret', secret && /^[A-Za-z0-9_-]{1,256}$/.test(secret) ? 'ok' : 'fail',
+    secret && /^[A-Za-z0-9_-]{1,256}$/.test(secret)
+      ? 'configured'
+      : 'WEBHOOK_SECRET is required in webhook mode (1-256 letters, digits, _ or -)');
+}
+
 let providerName: string | null = null;
 try {
   const { env } = await import('../src/config/env.js');

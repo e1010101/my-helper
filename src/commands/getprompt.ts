@@ -1,6 +1,7 @@
 import { Context, Markup } from 'telegraf';
 import { db, Prompt } from '../services/database.js';
 import { escapeHtml } from '../utils/telegram-format.js';
+import { splitTelegramHtml } from '../utils/telegram-chunk.js';
 
 interface PromptPaginationState {
     chatId: number;
@@ -66,7 +67,7 @@ function getPaginationKeyboard(currentIndex: number, total: number) {
     return Markup.inlineKeyboard([buttons]);
 }
 
-function formatPromptCaption(prompt: Prompt, currentIndex: number, total: number): string {
+function formatPromptOutput(prompt: Prompt, currentIndex: number, total: number): { caption: string; details: string[] } {
     const tagsStr = prompt.tags && prompt.tags.length > 0
         ? prompt.tags.map(escapeHtml).join(', ')
         : 'None';
@@ -79,14 +80,17 @@ function formatPromptCaption(prompt: Prompt, currentIndex: number, total: number
     const body = escapeHtml(prompt.prompt ?? '');
     const full = header + body;
 
-    // Long prompts would otherwise make Telegram reject the whole caption.
-    if (full.length <= MAX_CAPTION_LENGTH) {
-        return full;
+    // Split before choosing a caption so tags and HTML entities are never cut.
+    // When any field is too long, keep the photo caption short and send all
+    // saved fields as regular messages; nothing is lost to a preview limit.
+    const captionParts = splitTelegramHtml(full, MAX_CAPTION_LENGTH);
+    if (captionParts.length === 1) {
+        return { caption: captionParts[0], details: [] };
     }
-
-    const overflowNotice = '\n\n<i>(truncated — prompt is too long for a caption)</i>';
-    const available = MAX_CAPTION_LENGTH - header.length - overflowNotice.length;
-    return header + body.slice(0, Math.max(available, 0)) + overflowNotice;
+    return {
+        caption: `📄 <b>Result ${currentIndex + 1} of ${total}</b>\n\nFull prompt details follow below.`,
+        details: splitTelegramHtml(full),
+    };
 }
 
 export async function getPromptCommand(ctx: Context) {
@@ -122,7 +126,7 @@ export async function getPromptCommand(ctx: Context) {
         }
 
         const firstResult = results[0];
-        const caption = formatPromptCaption(firstResult, 0, results.length);
+        const { caption, details } = formatPromptOutput(firstResult, 0, results.length);
         const keyboard = getPaginationKeyboard(0, results.length);
 
         const sentMessage = await ctx.replyWithPhoto(firstResult.image_file_id, {
@@ -130,6 +134,8 @@ export async function getPromptCommand(ctx: Context) {
             parse_mode: 'HTML',
             reply_markup: results.length > 1 ? keyboard.reply_markup : undefined,
         });
+
+        for (const chunk of details) await ctx.reply(chunk, { parse_mode: 'HTML' });
 
         if (results.length > 1) {
             paginationStates.set(userId, {
@@ -155,7 +161,8 @@ export async function getPromptActionHandler(ctx: Context) {
     }
 
     const state = paginationStates.get(userId);
-    if (!state) {
+    const message = ctx.callbackQuery && 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : undefined;
+    if (!state || state.chatId !== message?.chat.id || state.messageId !== message?.message_id) {
         await ctx.answerCbQuery('Pagination session expired. Please run /getprompt again.', { show_alert: true });
         return;
     }
@@ -176,8 +183,7 @@ export async function getPromptActionHandler(ctx: Context) {
         return;
     }
 
-    state.currentIndex = newIndex;
-    const caption = formatPromptCaption(currentResult, newIndex, state.results.length);
+    const { caption, details } = formatPromptOutput(currentResult, newIndex, state.results.length);
     const keyboard = getPaginationKeyboard(newIndex, state.results.length);
 
     try {
@@ -196,7 +202,11 @@ export async function getPromptActionHandler(ctx: Context) {
             }
         );
 
+        state.currentIndex = newIndex;
         paginationStates.set(userId, state);
+        for (const chunk of details) {
+            await ctx.telegram.sendMessage(state.chatId, chunk, { parse_mode: 'HTML' });
+        }
         await ctx.answerCbQuery();
     } catch (error) {
         console.error('Error updating paginated prompt message:', error);

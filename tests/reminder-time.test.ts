@@ -162,3 +162,56 @@ test('parseNaturalTime accepts ISO timestamps and rejects nonsense', () => {
   assert.equal(parseNaturalTime('sometime soon', now, SINGAPORE), null);
   assert.equal(parseNaturalTime('', now, SINGAPORE), null);
 });
+
+test('unsupported weekday sets are rejected instead of becoming Monday-only reminders', () => {
+  const now = new Date('2026-10-27T00:00:00Z'); // Tuesday 08:00 Singapore
+  assert.equal(parseNaturalTime('every weekday at 09:00', now, SINGAPORE), null);
+  assert.equal(parseNaturalTime('every weekdays at 09:00', now, SINGAPORE), null);
+  assert.equal(parseNaturalTime('every monday at 09:00', now, SINGAPORE)?.recurrence?.dayOfWeek, 1);
+});
+
+test('offset-less ISO dates use the configured timezone, including seconds and fractions', () => {
+  const now = new Date('2026-10-27T00:00:00Z');
+  assert.equal(parseNaturalTime('2026-10-28T09:00', now, SINGAPORE)?.date.toISOString(), '2026-10-28T01:00:00.000Z');
+  assert.equal(parseNaturalTime('2026-10-28T09:00', now, NEW_YORK)?.date.toISOString(), '2026-10-28T13:00:00.000Z');
+  assert.equal(parseNaturalTime('2026-10-28 09:00:12.34', now, SINGAPORE)?.date.toISOString(), '2026-10-28T01:00:12.340Z');
+  assert.equal(parseNaturalTime('2026-10-28', now, SINGAPORE)?.date.toISOString(), '2026-10-27T16:00:00.000Z');
+});
+
+test('explicit ISO offsets continue to identify absolute instants', () => {
+  const now = new Date('2026-10-27T00:00:00Z');
+  assert.equal(parseNaturalTime('2026-10-28T09:00:00+08:00', now, NEW_YORK)?.date.toISOString(), '2026-10-28T01:00:00.000Z');
+  assert.equal(parseNaturalTime('2026-10-28T09:00:00Z', now, SINGAPORE)?.date.toISOString(), '2026-10-28T09:00:00.000Z');
+});
+
+test('ISO parsing rejects impossible or partially matched dates', () => {
+  const now = new Date('2026-01-01T00:00:00Z');
+  for (const text of ['2026-02-30T09:00', '2026-02-30T09:00Z', '2026-13-01', '2026-10-28T25:00',
+    '2026-10-28T09:60', '2026-10-28T09:00:60', '2026-10-28T09:00+25:00', 'later on 2026-10-28']) {
+    assert.equal(parseNaturalTime(text, now, SINGAPORE), null, text);
+  }
+  assert.equal(parseNaturalTime('2028-02-29T09:00', now, SINGAPORE)?.date.toISOString(), '2028-02-29T01:00:00.000Z');
+});
+
+test('spring DST gaps shift forward rather than backwards or skipping the day', () => {
+  const instant = instantFromWallClock(2026, 3, 8, 2, 30, NEW_YORK);
+  assert.equal(instant.toISOString(), '2026-03-08T07:30:00.000Z');
+  assert.equal(localKey(instant, NEW_YORK), '2026-03-08T03:30');
+  const next = nextOccurrence({ timeOfDay: '02:30' }, new Date('2026-03-08T06:45:00Z'), NEW_YORK);
+  assert.equal(next?.toISOString(), '2026-03-08T07:30:00.000Z');
+  assert.equal(parseNaturalTime('2026-03-08T02:30', new Date('2026-03-07T00:00:00Z'), NEW_YORK)?.date.toISOString(), instant.toISOString());
+});
+
+test('half-hour DST gaps preserve the minute offset within the gap', () => {
+  const zone = 'Australia/Lord_Howe';
+  const instant = instantFromWallClock(2026, 10, 4, 2, 15, zone);
+  assert.equal(localKey(instant, zone), '2026-10-04T02:45');
+  assert.equal(instant.toISOString(), '2026-10-03T15:45:00.000Z');
+});
+
+test('fall DST repeats choose the earlier occurrence and do not fire twice that day', () => {
+  const instant = instantFromWallClock(2026, 11, 1, 1, 30, NEW_YORK);
+  assert.equal(instant.toISOString(), '2026-11-01T05:30:00.000Z');
+  const next = nextOccurrence({ timeOfDay: '01:30' }, instant, NEW_YORK);
+  assert.equal(next?.toISOString(), '2026-11-02T06:30:00.000Z');
+});
