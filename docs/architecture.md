@@ -27,7 +27,7 @@ Any message that does not start with `/` goes to the model, which can call tools
 
 **AI-proposed changes require a Confirm tap.** Read-only tools run silently. A write stops the conversation and shows Confirm / Cancel buttons, which expire after 10 minutes. Chat history is persisted automatically; explicit commands and forms use their own controls. Confirmations are atomically consumed before execution, so concurrent taps cannot run one action twice.
 
-**Time phrases the reminder parser understands:** "in 30 minutes", "in 2 hours", "in 3 days", "today at 18:00", "tonight at 8pm", "tomorrow at 07:30", "monday at 09:00", "every day at 09:00", "every monday at 09:00", and an ISO timestamp. ISO input without an offset uses the configured timezone. Unsupported multi-day schedules such as "every weekday" are rejected. DST gaps shift forward by the missing interval; repeated times choose the earlier instant. Reminders live in Postgres, so they survive restarts, and one that came due while the bot was down is delivered marked "(missed earlier)".
+**Time phrases the reminder parser understands:** "in 30 minutes", "in 2 hours", "in 3 days", "today at 18:00", "tonight at 8pm", "tomorrow at 07:30", "monday at 09:00", "every day at 09:00", "every monday at 09:00", and an ISO timestamp. ISO input without an offset uses the configured timezone. Unsupported multi-day schedules such as "every weekday" are rejected. DST gaps shift forward by the missing interval; repeated times choose the earlier instant. Reminders and their pending occurrences live in Postgres, so they survive restarts. Overdue deliveries show their original scheduled time.
 
 ### Commands
 
@@ -37,7 +37,9 @@ Any message that does not start with `/` goes to the model, which can call tools
 | `/task -create` | Interactive form: name, description, submit |
 | `/task -read <id>`, `/task -read all` | Show one task, or all of them |
 | `/task -update <id>`, `/task -delete <id>` | Edit or delete a task |
-| `/tasks` | List your tasks |
+| `/tasks` | List todos and active reminder schedules; links to pending occurrences |
+| `/pending` | Pending occurrences, including inactive one-off schedules, with Done, Snooze and Skip |
+| `/reminders` | Durable quiet-hour and opt-in follow-up settings |
 | `/prompt` | Save a prompt template: title, text, tags and an optional image |
 | `/getprompt` | Search saved prompts, with pagination |
 | `/memory` | What the assistant holds about you: facts, reminders and message count |
@@ -73,7 +75,7 @@ flowchart TB
     end
 
     subgraph Supabase["Supabase (managed Postgres)"]
-        PG[("11 tables<br/>RLS on all tables")]
+        PG[("14 tables<br/>RLS on all tables")]
     end
 
     DeepSeek["DeepSeek API<br/>deepseek-chat"]
@@ -137,6 +139,7 @@ Every file in `src/`, by layer:
 | Bot | `bot.ts` | Telegraf wiring, HTTP server, lifecycle, shutdown |
 | Commands | `commands/index.ts` | `/start`, `/help`, `/ping`, `/task`, `/tasks`, `/status`, `/stats` |
 | Commands | `commands/assistant-commands.ts` | `/forget`, `/memory` |
+| Commands | `commands/actionable-reminders.ts` | `/pending`, `/reminders`, versioned occurrence actions and delivery cards |
 | Commands | `commands/prompt.ts` | Multi-step `/prompt` form |
 | Commands | `commands/getprompt.ts` | `/getprompt` search and pagination |
 | Assistant | `services/assistant.ts` | The conversation loop, tool dispatch, confirmations |
@@ -146,11 +149,13 @@ Every file in `src/`, by layer:
 | Tools | `tools/registry.ts` | Registry and argument validation |
 | Tools | `tools/builtin-tools.ts` | The 8 callable tools |
 | Persistence | `services/assistant-store.ts` | `AssistantStore` interface |
+| Persistence | `services/reminder-action-store.ts` | Occurrence, preference and atomic operation contracts |
 | Persistence | `services/supabase-assistant-store.ts` | Postgres-backed store (production) |
 | Persistence | `services/in-memory-assistant-store.ts` | In-memory store (tests) |
 | Persistence | `services/database.ts` | Shared Supabase client, tasks and prompts |
 | Background | `services/reminder-scheduler.ts` | 30s poll and delivery |
 | Background | `services/reminder-time.ts` | Timezone maths, recurrence, natural-language time parsing |
+| Background | `services/reminder-policy.ts` | Quiet-hour validation, DST-aware deferral and snooze times |
 | Support | `config/env.ts` | Lazy configuration, validated on first read |
 | Support | `services/health.ts` | Health snapshot for `/health` and `/status` |
 | Support | `services/logger.ts` | Leveled console logger |
@@ -260,47 +265,71 @@ Argument validation is the only gate between model output and a side effect. It 
 
 ## 5. Reminders and time
 
-Reminders are the one feature that has to work while you are not looking, and the one place where timezones genuinely matter.
+The schedule and the delivered occurrence have separate lifecycles. A recurring schedule
+can advance while yesterday's occurrence still awaits Done, Snooze or Skip. A one-off
+schedule becomes inactive once its occurrence is created, and `/pending` still finds
+that occurrence independently of the active schedule list.
 
 ```mermaid
-flowchart LR
-    subgraph Request["1. At request time"]
-        direction TB
-        Ask["'every Monday at 09:00'"] --> Parse["parseNaturalTime()<br/>interprets the phrase"]
-        Parse --> Rule["wall-clock rule:<br/>timeOfDay, dayOfWeek"]
-        Rule --> Next["nextOccurrence()<br/>resolves the next<br/>real instant"]
-    end
-
-    subgraph Storage["2. In Postgres"]
-        direction TB
-        Row[("reminders row<br/>next_run_at (absolute)<br/>time_of_day (wall clock)<br/>day_of_week (rule)")]
-    end
-
-    subgraph Runtime["3. Every 30 seconds, forever"]
-        direction TB
-        Poll["listDueReminders(now)"] --> Any{"anything due?"}
-        Any -->|no| Poll
-        Any -->|yes| Deliver["sendMessage<br/>to the owner"]
-        Deliver --> Done{"one-off or<br/>recurring?"}
-        Done -->|one-off| Deactivate["mark inactive"]
-        Done -->|recurring| Reschedule["compute the next<br/>occurrence, then<br/>record it was sent"]
-    end
-
-    Request --> Storage --> Runtime
-
+flowchart TD
+    Rule["Confirmed reminder<br/>wall-clock rule + next_run_at"] --> Poll["Every 30 seconds:<br/>find due schedules"]
+    Poll --> Materialize["Atomic materialization:<br/>create unique occurrence +<br/>advance recurring schedule or deactivate one-off"]
+    Materialize --> Row[("reminder_occurrences<br/>text snapshot + scheduled_for +<br/>status + next_notification_at")]
+    Row --> Claim["Atomically claim due occurrence<br/>with version and 60-second lease"]
+    Claim --> Policy{"Quiet hours?<br/>Follow-ups allowed?<br/>Daily budget available?"}
+    Policy -->|defer or stop| Queue["Persist next eligible time<br/>or clear automatic notification"]
+    Queue --> Row
+    Policy -->|send| Verify["Recheck pending status,<br/>version and lease"]
+    Verify --> Send["Send complete escaped text<br/>and versioned action buttons"]
+    Send --> Record["Record delivery under same lease;<br/>optionally queue follow-up"]
+    Record --> Row
+    Send --> Tap["Done / Skip / Snooze"]
+    Tap --> Action["Atomic owner + version check;<br/>close occurrence or reschedule notification;<br/>increment version and invalidate lease"]
+    Action --> Row
     classDef store fill:#dbe4ff,stroke:#5b7bd5,color:#1f2328
     class Row store
 ```
 
 **Why store both an instant and a rule.** `next_run_at` answers "when does this fire next" cheaply and is what the poll queries. But a rule expressed only as an instant drifts across daylight-saving changes — "every Monday 09:00" would become 08:00. Keeping `time_of_day` and `day_of_week` lets each occurrence be recomputed in local terms, so the wall-clock time is stable.
 
-**Delivery is at-least-once, deliberately.** The reminder is marked sent only after the message actually goes out. If the process dies in between, you may get a duplicate — which is a far better failure than silence. A reminder whose time passed while the service was down arrives marked "(missed earlier)" rather than being dropped.
+**Actions target an occurrence.** Done and Skip end its pending state; Snooze sets its
+next notification without changing the recurring schedule. Short snoozes use elapsed
+10-minute or one-hour intervals; Tomorrow means 09:00 the next local day. Callback
+data includes the occurrence ID and version. The store checks the sender's ownership
+and version atomically; a repeated or stale button cannot act twice or target the next
+occurrence. Only the tapped message's markup changes, preserving its full text.
+Cancelling a reminder also cancels its pending occurrences and queued sends. A
+text-only schedule edit leaves existing occurrence snapshots and delivery state intact.
+
+**Quiet hours and follow-ups are durable preferences.** Both default off.
+`/reminders quiet 22:00 08:00` sets an overnight interval; `/reminders quiet off` clears it. Times
+must use `HH:MM` and differ. Initial sends, snoozes and follow-ups all wait until the
+quiet interval ends in the configured timezone, including DST gaps and folds.
+`/reminders followups on` explicitly enables follow-ups for future deliveries;
+`/reminders followups off` cancels queued follow-ups. Explicit ON/OFF buttons are
+idempotent and scoped to the settings card's owner.
+
+Follow-ups are limited to two per occurrence, at least 60 minutes after the preceding
+delivery, and five attempts per user per local day. The daily budget is reserved
+atomically before sending; failed attempts consume it too. An exhausted daily budget
+defers the notification to the next local day, still subject to quiet hours. Enabling
+follow-ups does not revive historical queues; unresolved occurrences stay available
+through `/pending` for explicit user actions.
+
+**Delivery remains at least once.** Materialization atomically stores the occurrence
+before advancing its schedule, so a failed send remains retryable even for an inactive
+one-off. A lease prevents normal concurrent delivery and expires after a worker crash.
+Delivery bookkeeping only commits under the same action version and lease, so it
+cannot overwrite a user's Done, Skip, Snooze or cancellation. Telegram does not offer
+transactional delivery with Postgres: if Telegram accepted a message but the process
+crashes before recording it, a retry can duplicate that message. A request already in
+flight cannot be recalled by a later action or preference change.
 
 ---
 
 ## 6. Data model
 
-Eleven tables, all protected by Row Level Security and explicit server-only grants. Anonymous and authenticated Data API roles have no access; application queries enforce Telegram user ownership through the service-role connection.
+Fourteen tables, all protected by Row Level Security and explicit server-only grants. Anonymous and authenticated Data API roles have no access; application queries enforce Telegram user ownership through the service-role connection.
 
 ### Assistant tables (RLS enabled)
 
@@ -354,6 +383,26 @@ erDiagram
     }
 ```
 
+### Actionable reminder tables (RLS enabled)
+
+| Table | Durable state |
+| --- | --- |
+| `reminder_occurrences` | Unique `(reminder_id, scheduled_for)` occurrence, text snapshot, owner, pending/done/skipped/cancelled status, notification time/kind, counts, action version and delivery lease |
+| `reminder_preferences` | User's quiet-hour start/end and explicit follow-up opt-in |
+| `reminder_followup_daily_usage` | User and local date keyed follow-up attempt count |
+
+The occurrence foreign key includes both reminder ID and user ID. Atomic SQL functions
+implement schedule materialization, delivery claims, actions, delivery completion,
+deferral, preference updates and daily-budget reservation. They are available only to
+the server role. `AssistantStore` extends `ReminderActionStore`; the in-memory adapter
+implements the same contract for middleware and scheduler regression tests.
+
+Apply `docs/database-schema.sql` using `npm run db:migrate` or the Supabase SQL Editor
+before deploying this version to Railway. The migration adds these three tables and
+functions without deleting existing schedules. New preferences default off. Readiness
+requires all 14 tables; local tests apply the migration twice in PGlite and exercise the
+SQL behavior without connecting to the live database.
+
 ### Task and prompt tables (RLS enabled)
 
 Used by the explicit `/task` and `/prompt` commands and the usage middleware.
@@ -394,7 +443,7 @@ flowchart LR
     Service["service_role key<br/>(server only)"]
     Anon["anon key<br/>(shareable)"]
 
-    Private["RLS enabled, service_role only<br/><br/>All 11 tables, including<br/>tasks, prompts, user_data,<br/>command_history and token_usage"]
+    Private["RLS enabled, service_role only<br/><br/>All 14 tables, including<br/>reminder occurrences, preferences<br/>and daily follow-up budgets"]
 
     Service --> Private
     Anon -.->|"refused: API grants revoked"| Private
@@ -504,8 +553,13 @@ sequenceDiagram
         S->>D: list due<br/>reminders
     end
     Note over S,D: 2 hours later
-    S->>U: DM, unprompted
-    S->>D: mark sent, only<br/>after delivery
+    S->>D: atomically create occurrence<br/>and deactivate one-off schedule
+    S->>D: claim due occurrence lease;<br/>check quiet hours and preferences
+    S->>U: DM with Done / Snooze / Skip
+    S->>D: record delivery under lease;<br/>queue follow-up only if opted in
+    U->>B: taps Done for occurrence + version
+    B->>D: atomically mark done;<br/>clear queue and invalidate lease
+    B->>U: acknowledge and remove buttons
 ```
 
 The unprompted DM at the end is the point of the whole system, and the reason the service must be running when you are not.

@@ -6,7 +6,7 @@ A powerful, extensible Telegram bot for personal assistance, built with TypeScri
 
 - 🔐 **Secure** - User-specific data storage with Supabase
 - 🧠 **Persistent memory** - Conversations, facts and reminders live in Postgres, not RAM
-- ⏰ **Reminders** - "remind me in 30 minutes", "every Monday at 9am", with timezone-correct scheduling
+- ⏰ **Actionable reminders** - Timezone-correct schedules with Done, Snooze, Skip, quiet hours and opt-in follow-ups
 - 🤝 **Confirm-before-write** - AI-proposed changes require a Confirm tap; explicit forms save on Submit or Save
 - 📝 **Task Capture** - Create, edit and persist to-do tasks
 - 💬 **AI Chat** - Free-form messages are answered by a configurable model (DeepSeek by default), with tools for your own data
@@ -86,6 +86,8 @@ npm start
 - `/ping` - Check bot responsiveness
 - `/task` - Manage to-do tasks (see [`/task` Usage](#task-usage))
 - `/tasks` - List your saved to-dos and active reminders (including recurring schedules)
+- `/pending` - Show pending reminder occurrences with Done, Snooze and Skip controls
+- `/reminders` - Configure quiet hours and opt-in follow-ups
 - `/prompt` - Create a prompt template (title, text, tags, image)
 - `/getprompt` - Search your saved prompts
 - `/forget` - Clear conversation memory (facts and reminders survive)
@@ -123,8 +125,45 @@ Relative times use the original message's timestamp. ISO dates without an offset
 the configured timezone. Daily and single-weekday recurrence are supported; requests
 such as "every weekday" are rejected rather than silently scheduled on Monday only.
 
-Reminders are stored in Postgres and polled by a scheduler, so they survive restarts;
-a reminder that came due while the bot was offline is delivered marked "(missed earlier)".
+Reminders and their pending occurrences are stored in Postgres and polled by a scheduler,
+so they survive restarts. Overdue deliveries retain their original scheduled timestamp.
+
+### Actionable reminders
+
+Each delivery shows its complete text, occurrence ID, scheduled time and timezone, with
+**Done**, **Skip**, **Snooze 10m**, **Snooze 1h** and **Tomorrow 09:00** buttons.
+Tomorrow means 09:00 on the next calendar day in `TIMEZONE`. Done and Skip close only
+that occurrence; snoozing moves only its next notification. Recurring schedules continue
+independently, and older deliveries cannot act on a newer occurrence.
+
+Open `/pending` to recover the controls after a restart or find an unanswered one-off
+reminder whose schedule has already become inactive. It shows up to 50 pending
+occurrences at a time; handling them reveals the remaining items. `/tasks` links to this
+list and continues to manage the underlying schedules. Cancelling or deleting a reminder
+also cancels its pending occurrences and queued notifications, while retaining history.
+
+Quiet hours and automatic follow-ups both default to **off** and are saved per user:
+
+| Command | Effect |
+| --- | --- |
+| `/reminders` | Show current preferences and explicit follow-up ON/OFF buttons |
+| `/reminders quiet 22:00 08:00` | Defer notifications during this overnight period in `TIMEZONE` |
+| `/reminders quiet off` | Disable quiet hours |
+| `/reminders followups on` | Opt into follow-ups for future deliveries |
+| `/reminders followups off` | Disable follow-ups and clear already queued follow-ups |
+
+Quiet hours require two different `HH:MM` times and apply to initial reminders,
+snoozes and follow-ups. Due notifications wait until the quiet period ends. Opt-in
+follow-ups are limited to **two per occurrence**, **60 minutes apart**, and **five
+attempts per user per local day**; failed attempts consume the daily budget too.
+Enabling follow-ups does not automatically rearm older pending occurrences. You can always
+use `/pending` and Snooze explicitly, whether automatic follow-ups are enabled or not.
+
+Delivery is at least once: a crash or uncertain Telegram response after a message is
+accepted but before delivery is recorded can cause a duplicate. Database leases prevent
+concurrent workers from normally sending the same occurrence, and versioned buttons
+prevent repeated or stale actions from changing it twice. An already in-flight message
+cannot be recalled by Done, Skip, cancellation, or a preference change.
 
 ### Weather
 
@@ -221,7 +260,8 @@ Expected behavior:
 2. Bot returns your most recent saved to-dos (up to 20), newest first, and your active reminders, including recurring schedules, with their next run times in your configured timezone
 3. Each item has its own card with an ID, status, timestamps, and **Edit** / **Delete** buttons. To-dos also have **Complete** / **Reopen** buttons
 4. **Edit** opens a pre-filled form. For reminders, edit the text or schedule (e.g. `every day at 22:00`, `every Monday at 09:00`, `every month on day 15 at 09:00`, or `tomorrow at 10:00`), then tap **Save**. To-dos use **Submit**. **Cancel** discards your edits
-5. **Delete** asks for confirmation. Deleting a reminder stops its future runs; its delivery history is retained
+5. **Delete** asks for confirmation. Deleting a reminder stops its future runs and cancels pending occurrences and notifications; its delivery history is retained
+6. Open `/pending` for delivered reminders awaiting Done, Snooze or Skip, and `/reminders` for quiet hours and follow-up preferences
 
 ### `/prompt` Usage
 
@@ -439,7 +479,7 @@ The bot includes comprehensive monitoring features:
 
 ## 💾 Database Schema
 
-The bot requires these Supabase tables:
+The bot requires these 14 Supabase tables:
 
 - `user_data` - Stores user-specific key-value data
 - `command_history` - Logs command usage for analytics
@@ -448,6 +488,9 @@ The bot requires these Supabase tables:
 - `conversations` - Assistant conversation memory
 - `facts` - Long-lived facts and preferences
 - `reminders` - Scheduled reminders
+- `reminder_occurrences` - Independent scheduled occurrences, action versions and notification leases
+- `reminder_preferences` - Per-user quiet hours and explicit follow-up opt-in
+- `reminder_followup_daily_usage` - Persistent per-user, local-day follow-up attempt budget
 - `pending_actions` - Write-tool confirmations awaiting a tap
 - `credentials` - Provider tokens (service_role only)
 - `health_probes` - Single fixed row the `/ready` write probe upserts
@@ -465,9 +508,13 @@ npm run db:migrate
 The script applies the schema, then prints per-table status including which tables have
 Row Level Security enabled, so you can confirm the migration took effect.
 
-**Upgrading an existing deployment:** apply the updated schema before starting the new
-application. It adds `pending_actions.requested_at`, enables RLS on the older task and
-prompt tables, and revokes anonymous/authenticated API grants on all private tables.
+**Upgrading an existing deployment:** apply the updated `docs/database-schema.sql`
+with `npm run db:migrate` or the Supabase SQL Editor **before deploying the new
+application to Railway**. Actionable reminders add the three reminder tables above and
+atomic database functions for materialization, leases, actions, settings and daily budgets.
+Existing schedules and other data are retained; quiet hours and follow-ups start off.
+The schema also includes the earlier `pending_actions.requested_at` migration, enables
+RLS on the older task and prompt tables, and revokes client API grants on private tables.
 Keep `SUPABASE_SERVICE_ROLE_KEY` configured. Webhook deployments also require a valid
 `WEBHOOK_SECRET`; missing or invalid secrets now stop startup before registration.
 The migration is repeatable and preserves existing rows.
@@ -478,7 +525,7 @@ Before deploying — or whenever something looks wrong — run the preflight che
 npm run preflight
 ```
 
-It verifies every required variable, that the Telegram token works, that all eleven tables
+It verifies every required variable, that the Telegram token works, that all fourteen tables
 exist, that the service-role key can actually write to the RLS-protected tables, that the
 anon key is correctly refused, that the configured model answers, and that reminders have
 a delivery destination. It makes provider requests and temporary database write probes.
@@ -493,7 +540,7 @@ It confirms both health endpoints answer correctly, that Telegram is pointed at 
 deployment with the secret configured, and that webhook delivery has no errors. Reminder
 delivery itself cannot be checked through the Bot API, so that stays a manual step.
 
-**Row Level Security:** all eleven tables have RLS enabled and server-only service-role
+**Row Level Security:** all fourteen tables have RLS enabled and server-only service-role
 access. Anonymous and authenticated API grants are revoked. Set
 `SUPABASE_SERVICE_ROLE_KEY` or persistence will fail; `/ready` reports database failures.
 

@@ -13,6 +13,8 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 // Statically imported for its type; the class itself is constructed below.
 import { InMemoryAssistantStore } from '../src/services/in-memory-assistant-store.js';
+import type { ReminderOccurrence } from '../src/services/reminder-action-store.js';
+import type { ReminderScheduler } from '../src/services/reminder-scheduler.js';
 
 process.env.NODE_ENV = 'production'; // keep the logger quiet
 // The sandbox blocks binding 3000, and start() opens a real health server.
@@ -165,6 +167,101 @@ function scriptText(text: string): void {
     },
   };
 }
+
+test('the real scheduler sends owner-scoped buttons that resolve a delivered one-off through middleware', async (t) => {
+  const store = new InMemoryAssistantStore();
+  const internals = assistant as unknown as AssistantInternals;
+  const scheduler = (bot as unknown as { scheduler: ReminderScheduler }).scheduler;
+  const schedulerInternals = scheduler as unknown as { store: unknown };
+  const previousStore = internals.store;
+  const previousSchedulerStore = schedulerInternals.store;
+  internals.store = store;
+  schedulerInternals.store = store;
+  t.after(() => { internals.store = previousStore; schedulerInternals.store = previousSchedulerStore; });
+  const nextRunAt = new Date(Date.now() - 60_000).toISOString();
+  const reminder = await store.createReminder({ userId: 4242, text: 'Call <mum> & dad', frequency: 'once', nextRunAt });
+  await store.createReminder({ userId: 9999, text: 'Another owner', frequency: 'once', nextRunAt });
+
+  apiCalls.length = 0;
+  const delivered = await scheduler.tick();
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0].reminderId, reminder.id);
+  const sent = apiCalls.filter(call => call.method === 'sendMessage');
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].payload.chat_id, 4242);
+  assert.match(String(sent[0].payload.text), /Call &lt;mum&gt; &amp; dad/);
+  const occurrence = (await store.listPendingReminderOccurrences(4242))[0];
+  assert.match(JSON.stringify(sent[0].payload.reply_markup), new RegExp(`occ:done:${occurrence.id}:${occurrence.version}`));
+  assert.equal(occurrence.nextNotificationAt, null, 'follow-ups default off');
+  assert.equal((await store.listReminders(4242)).length, 0, 'one-off series is inactive after materialization');
+  assert.equal((await store.listReminders(9999)).length, 1, 'another user schedule was not consumed');
+
+  apiCalls.length = 0;
+  await sendText('/pending');
+  assert.match(allMessages(), /Call &lt;mum&gt; &amp; dad/);
+  await tapButton(`occ:done:${occurrence.id}:${occurrence.version}`);
+  assert.equal((await store.getReminderOccurrence(occurrence.id, 4242))?.status, 'done');
+});
+
+test('reminder preference commands and buttons reach persistence through the real middleware', async (t) => {
+  const store = new InMemoryAssistantStore();
+  const internals = assistant as unknown as AssistantInternals;
+  const previousStore = internals.store;
+  internals.store = store;
+  t.after(() => { internals.store = previousStore; });
+
+  apiCalls.length = 0;
+  await sendText('/reminders');
+  assert.match(lastMessage(), /Follow-ups:<\/b> Off/);
+  await sendText('/reminders quiet 22:00 08:00');
+  await sendText('/reminders followups on');
+  assert.deepEqual(await store.getReminderPreferences(4242), {
+    userId: 4242, quietHoursStart: '22:00', quietHoursEnd: '08:00', followUpsEnabled: true,
+  });
+  await tapButton('reminderprefs:off:4242');
+  assert.equal((await store.getReminderPreferences(4242)).followUpsEnabled, false);
+});
+
+async function leasedOccurrence(text: string): Promise<ReminderOccurrence> {
+  const store = new InMemoryAssistantStore();
+  const now = new Date();
+  const reminder = await store.createReminder({ userId: 4242, text, frequency: 'once', nextRunAt: now.toISOString() });
+  const occurrence = await store.materializeReminder(reminder, null, now);
+  assert.ok(occurrence);
+  const leased = await store.claimReminderOccurrence(occurrence.id, occurrence.version, now, new Date(now.getTime() + 60_000), 'test-lease');
+  assert.ok(leased);
+  return leased;
+}
+
+test('reminder transport splits long text and attaches controls once, to the final chunk', async () => {
+  const occurrence = await leasedOccurrence('<report> & details '.repeat(800));
+  apiCalls.length = 0;
+  await (bot as unknown as { deliverReminder(occurrence: ReminderOccurrence): Promise<void> }).deliverReminder(occurrence);
+  const sent = apiCalls.filter(call => call.method === 'sendMessage');
+  assert.ok(sent.length > 1);
+  assert.ok(sent.slice(0, -1).every(call => call.payload.reply_markup === undefined));
+  assert.match(JSON.stringify(sent.at(-1)?.payload.reply_markup), /occ:done:/);
+  assert.ok(sent.every(call => String(call.payload.text).replace(/<[^>]+>|&(?:lt|gt|amp);/g, '').length <= 4096));
+});
+
+test('reminder transport rejects wrong owners and expired leases and aborts a stalled send within its lease', async (t) => {
+  const occurrence = await leasedOccurrence('Bounded send');
+  const transport = bot as unknown as { deliverReminder(occurrence: ReminderOccurrence): Promise<void> };
+  apiCalls.length = 0;
+  await assert.rejects(transport.deliverReminder({ ...occurrence, userId: 9999 }), /configured owner/);
+  await assert.rejects(transport.deliverReminder({ ...occurrence, leaseUntil: new Date(0).toISOString() }), /lease expired/);
+  assert.equal(apiCalls.length, 0);
+
+  const fixedNow = Date.now();
+  t.mock.method(Date, 'now', () => fixedNow);
+  let signal: AbortSignal | undefined;
+  t.mock.method(bot.getBot().telegram, 'callApi', (_method: string, _payload: unknown, options: { signal: AbortSignal }) => {
+    signal = options.signal;
+    return new Promise(() => {});
+  });
+  await assert.rejects(transport.deliverReminder({ ...occurrence, leaseUntil: new Date(fixedNow + 1_030).toISOString() }), /timed out/);
+  assert.equal(signal?.aborted, true);
+});
 
 test('a command is answered through the real middleware chain', async () => {
   apiCalls.length = 0;

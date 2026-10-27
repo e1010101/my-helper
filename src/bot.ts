@@ -15,7 +15,9 @@ import { createDefaultToolRegistry } from './tools/builtin-tools.js';
 import { createAIClient } from './services/ai-provider.js';
 import { formatLocal } from './services/reminder-time.js';
 import { registerAssistantCommands } from './commands/assistant-commands.js';
+import { registerActionableReminderCommands, occurrenceMessage, occurrenceKeyboard } from './commands/actionable-reminders.js';
 import type { AssistantStore } from './services/assistant-store.js';
+import type { ReminderOccurrence } from './services/reminder-action-store.js';
 import { renderDashboard } from './utils/dashboard.js';
 import { timingSafeEqual } from 'node:crypto';
 
@@ -111,10 +113,8 @@ export class Bot {
     this.scheduler = new ReminderScheduler({
       store,
       timezone: env.timezone(),
-      deliver: async ({ reminder, late }) => {
-        const prefix = late ? '⏰ (missed earlier) ' : '⏰ ';
-        await this.sendToOwner(`${prefix}${escapeHtml(reminder.text)}`);
-      },
+      userId: this.ownerChatId() ?? undefined,
+      deliver: ({ occurrence }) => this.deliverReminder(occurrence),
       // The poll is the process heartbeat, so expired confirmations are
       // cleaned up here rather than on a second timer.
       onPoll: () => this.assistant.pruneExpiredConfirmations(),
@@ -139,13 +139,45 @@ export class Bot {
     return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
   }
 
-  private async sendToOwner(html: string): Promise<void> {
+  private async deliverReminder(occurrence: ReminderOccurrence): Promise<void> {
     const chatId = this.ownerChatId();
-    if (chatId === null) {
-      logger.warn('Cannot deliver message: ADMIN_USER_ID is not configured');
-      return;
+    if (chatId === null || chatId !== occurrence.userId) {
+      throw new Error('Reminder delivery requires the configured owner');
     }
-    await this.bot.telegram.sendMessage(chatId, html, { parse_mode: 'HTML' });
+    // Finish before another worker can acquire the lease. One deadline covers
+    // all chunks, including store latency already spent since the claim.
+    const leaseRemaining = new Date(occurrence.leaseUntil ?? 0).getTime() - Date.now() - 1_000;
+    const timeoutMs = Math.min(30_000, leaseRemaining);
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('Reminder delivery lease expired');
+
+    const controller = new AbortController();
+    type ApiSignal = NonNullable<Parameters<typeof this.bot.telegram.callApi>[2]>['signal'];
+    const chunks = splitTelegramHtml(occurrenceMessage(occurrence, env.timezone()));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new Error('Reminder delivery timed out'));
+        }, timeoutMs);
+      });
+      await Promise.race([
+        (async () => {
+          for (let index = 0; index < chunks.length; index++) {
+            controller.signal.throwIfAborted();
+            await this.bot.telegram.callApi('sendMessage', {
+              chat_id: chatId,
+              text: chunks[index],
+              parse_mode: 'HTML',
+              ...(index === chunks.length - 1 ? { reply_markup: occurrenceKeyboard(occurrence) } : {}),
+            }, { signal: controller.signal as unknown as ApiSignal });
+          }
+        })(),
+        deadline,
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private setupMiddleware() {
@@ -172,6 +204,10 @@ export class Bot {
   }
 
   private setupCommands() {
+    registerActionableReminderCommands(this.bot, {
+      getStore: () => this.assistant.getStore(),
+      timezone: env.timezone(),
+    });
     registerCommands(this.bot, {
       getStore: () => this.assistant.getStore(),
       timezone: env.timezone(),

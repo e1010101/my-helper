@@ -2,6 +2,8 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { db } from './database.js';
 import { localDateKey } from './token-usage.js';
 import type { AssistantStore } from './assistant-store.js';
+import { defaultReminderPreferences, type ReminderOccurrence, type ReminderPreferences, type ReminderPreferencesPatch } from './reminder-action-store.js';
+import { validateFollowUpBudget, validateFutureInstant, validateReminderOwner } from './reminder-store-validation.js';
 import type {
   ConversationMessage,
   DailyTokenUsage,
@@ -58,6 +60,31 @@ interface PendingActionRow {
   requested_at?: string | null;
   created_at: string;
   expires_at: string;
+}
+
+interface OccurrenceRow {
+  id: number; reminder_id: number; user_id: number; text: string; scheduled_for: string;
+  status: ReminderOccurrence['status']; next_notification_at: string | null;
+  notification_kind: ReminderOccurrence['notificationKind']; last_notified_at: string | null;
+  notification_count: number; follow_up_count: number; completed_at: string | null;
+  version: number; lease_token: string | null; lease_until: string | null;
+}
+
+interface PreferencesRow {
+  user_id: number; quiet_hours_start: string | null; quiet_hours_end: string | null; follow_ups_enabled: boolean;
+}
+
+function toOccurrence(row: OccurrenceRow): ReminderOccurrence {
+  return {
+    id: row.id, reminderId: row.reminder_id, userId: row.user_id, text: row.text, scheduledFor: row.scheduled_for,
+    status: row.status, nextNotificationAt: row.next_notification_at, notificationKind: row.notification_kind,
+    lastNotifiedAt: row.last_notified_at, notificationCount: row.notification_count, followUpCount: row.follow_up_count,
+    completedAt: row.completed_at, version: row.version, leaseToken: row.lease_token, leaseUntil: row.lease_until,
+  };
+}
+
+function toPreferences(row: PreferencesRow): ReminderPreferences {
+  return { userId: row.user_id, quietHoursStart: row.quiet_hours_start, quietHoursEnd: row.quiet_hours_end, followUpsEnabled: row.follow_ups_enabled };
 }
 
 interface UsageRow {
@@ -309,14 +336,16 @@ export class SupabaseAssistantStore implements AssistantStore {
     return (data as ReminderRow[]).map(toReminder);
   }
 
-  async listDueReminders(now: Date, limit = 50): Promise<Reminder[]> {
-    const { data, error } = await this.client
+  async listDueReminders(now: Date, limit = 50, userId?: number): Promise<Reminder[]> {
+    let query = this.client
       .from('reminders')
       .select('*')
       .eq('active', true)
       .lte('next_run_at', now.toISOString())
       .order('next_run_at', { ascending: true })
       .limit(limit);
+    if (userId !== undefined) query = query.eq('user_id', userId);
+    const { data, error } = await query;
 
     if (error) {
       throw new Error(`Failed to load due reminders: ${error.message}`);
@@ -373,19 +402,101 @@ export class SupabaseAssistantStore implements AssistantStore {
   }
 
   async cancelReminder(id: number, userId: number): Promise<boolean> {
-    const { data, error } = await this.client
-      .from('reminders')
-      .update({ active: false })
-      .eq('id', id)
-      .eq('user_id', userId)
-      .eq('active', true)
-      .select('id');
+    return this.reminderBooleanRpc('cancel_reminder_occurrences', { p_reminder_id: id, p_user_id: userId });
+  }
 
-    if (error) {
-      throw new Error(`Failed to cancel reminder: ${error.message}`);
-    }
+  private async reminderBooleanRpc(name: string, args: Record<string, unknown>): Promise<boolean> {
+    const { data, error } = await this.client.rpc(name, args);
+    if (error) throw new Error(`Failed reminder operation ${name}: ${error.message}`);
+    return data === true;
+  }
 
-    return (data?.length ?? 0) > 0;
+  private async reminderOccurrenceRpc(name: string, args: Record<string, unknown>): Promise<ReminderOccurrence | null> {
+    const { data, error } = await this.client.rpc(name, args).maybeSingle();
+    if (error) throw new Error(`Failed reminder operation ${name}: ${error.message}`);
+    return data ? toOccurrence(data as OccurrenceRow) : null;
+  }
+
+  async materializeReminder(reminder: Reminder, nextRunAt: string | null, now: Date): Promise<ReminderOccurrence | null> {
+    validateReminderOwner(reminder.userId);
+    if (nextRunAt !== null) validateFutureInstant(nextRunAt, now);
+    return this.reminderOccurrenceRpc('materialize_reminder_occurrence', {
+      p_reminder_id: reminder.id, p_user_id: reminder.userId, p_expected_next_run_at: reminder.nextRunAt,
+      p_expected_frequency: reminder.frequency, p_expected_time_of_day: reminder.timeOfDay,
+      p_expected_day_of_week: reminder.dayOfWeek, p_expected_day_of_month: reminder.dayOfMonth,
+      p_next_run_at: nextRunAt, p_now: now.toISOString(),
+    });
+  }
+
+  async listPendingReminderOccurrences(userId: number, limit = 100): Promise<ReminderOccurrence[]> {
+    validateReminderOwner(userId);
+    const { data, error } = await this.client.from('reminder_occurrences').select('*')
+      .eq('user_id', userId).eq('status', 'pending').order('scheduled_for').order('id').limit(limit);
+    if (error) throw new Error(`Failed to list reminder occurrences: ${error.message}`);
+    return ((data ?? []) as OccurrenceRow[]).map(toOccurrence);
+  }
+
+  async listDueReminderOccurrences(now: Date, limit = 50, userId?: number): Promise<ReminderOccurrence[]> {
+    if (userId !== undefined) validateReminderOwner(userId);
+    let query = this.client.from('reminder_occurrences').select('*').eq('status', 'pending')
+      .lte('next_notification_at', now.toISOString()).or(`lease_until.is.null,lease_until.lte.${now.toISOString()}`)
+      .order('next_notification_at').order('id').limit(limit);
+    if (userId !== undefined) query = query.eq('user_id', userId);
+    const { data, error } = await query;
+    if (error) throw new Error(`Failed to load due reminder occurrences: ${error.message}`);
+    return ((data ?? []) as OccurrenceRow[]).map(toOccurrence);
+  }
+
+  async getReminderOccurrence(id: number, userId: number): Promise<ReminderOccurrence | null> {
+    validateReminderOwner(userId);
+    const { data, error } = await this.client.from('reminder_occurrences').select('*').eq('id', id).eq('user_id', userId).maybeSingle();
+    if (error) throw new Error(`Failed to read reminder occurrence: ${error.message}`);
+    return data ? toOccurrence(data as OccurrenceRow) : null;
+  }
+
+  async claimReminderOccurrence(id: number, version: number, now: Date, leaseUntil: Date, token: string): Promise<ReminderOccurrence | null> {
+    validateFutureInstant(leaseUntil.toISOString(), now);
+    if (!token) throw new Error('A delivery lease requires a token.');
+    return this.reminderOccurrenceRpc('claim_reminder_occurrence', { p_id: id, p_version: version, p_now: now.toISOString(), p_lease_until: leaseUntil.toISOString(), p_token: token });
+  }
+
+  async actOnReminderOccurrence(id: number, userId: number, version: number, action: 'done' | 'skip' | 'snooze', now: Date, snoozeUntil?: string): Promise<ReminderOccurrence | null> {
+    validateReminderOwner(userId);
+    if (action === 'snooze') validateFutureInstant(snoozeUntil ?? '', now);
+    return this.reminderOccurrenceRpc('act_on_reminder_occurrence', { p_id: id, p_user_id: userId, p_version: version, p_action: action, p_now: now.toISOString(), p_snooze_until: snoozeUntil ?? null });
+  }
+
+  async finishReminderOccurrence(id: number, version: number, token: string, sentAt: Date, nextNotificationAt: string | null): Promise<boolean> {
+    if (nextNotificationAt !== null) validateFutureInstant(nextNotificationAt, sentAt);
+    return this.reminderBooleanRpc('finish_reminder_occurrence', { p_id: id, p_version: version, p_token: token, p_sent_at: sentAt.toISOString(), p_next_notification_at: nextNotificationAt });
+  }
+
+  async deferReminderOccurrence(id: number, version: number, token: string, until: string | null): Promise<boolean> {
+    return this.reminderBooleanRpc('defer_reminder_occurrence', { p_id: id, p_version: version, p_token: token, p_until: until });
+  }
+
+  async getReminderPreferences(userId: number): Promise<ReminderPreferences> {
+    validateReminderOwner(userId);
+    const { data, error } = await this.client.from('reminder_preferences').select('*').eq('user_id', userId).maybeSingle();
+    if (error) throw new Error(`Failed to read reminder preferences: ${error.message}`);
+    return data ? toPreferences(data as PreferencesRow) : defaultReminderPreferences(userId);
+  }
+
+  async updateReminderPreferences(userId: number, patch: ReminderPreferencesPatch): Promise<ReminderPreferences> {
+    validateReminderOwner(userId);
+    const { data, error } = await this.client.rpc('update_reminder_preferences', {
+      p_user_id: userId, p_patch: Object.fromEntries(Object.entries({
+        quiet_hours_start: patch.quietHoursStart, quiet_hours_end: patch.quietHoursEnd, follow_ups_enabled: patch.followUpsEnabled,
+      }).filter(([, value]) => value !== undefined)),
+    }).single();
+    if (error) throw new Error(`Failed to update reminder preferences: ${error.message}`);
+    return toPreferences(data as PreferencesRow);
+  }
+
+  async reserveReminderFollowUp(userId: number, localDate: string, maximum: number): Promise<boolean> {
+    validateReminderOwner(userId);
+    validateFollowUpBudget(localDate, maximum);
+    return this.reminderBooleanRpc('reserve_reminder_follow_up', { p_user_id: userId, p_local_date: localDate, p_maximum: maximum });
   }
 
   async createPendingAction(

@@ -11,6 +11,8 @@ This document explains all available commands and how to add new ones.
 | `/ping` | Responsiveness + latency |
 | `/task` | Task CRUD (`-create`, `-read`, `-update`, `-delete`) |
 | `/tasks` | List to-dos with completion toggles and active reminders |
+| `/pending` | Pending reminder occurrences with Done, Snooze and Skip controls |
+| `/reminders` | Configure quiet hours and opt-in follow-ups |
 | `/prompt` | Create a prompt template |
 | `/getprompt` | Search prompt templates |
 | `/status` | Admin: health, uptime, memory |
@@ -129,6 +131,30 @@ Bot: 📝 Your Tasks (2)
         Milk, eggs, bread
         Created: 2/21/2026
 ```
+
+---
+
+### `/pending` and `/reminders`
+
+`/pending` lists up to 50 pending occurrences, including delivered one-off reminders
+whose schedules are inactive. Done and Skip resolve that occurrence; Snooze 10m,
+Snooze 1h and Tomorrow 09:00 reschedule its notification without changing its recurring
+schedule. Tomorrow uses the next calendar day in the configured timezone. Repeated or
+stale button taps cannot change an occurrence twice.
+
+| Command | Effect |
+| --- | --- |
+| `/reminders` | Show durable preferences and explicit follow-up ON/OFF buttons |
+| `/reminders quiet 22:00 08:00` | Set an overnight quiet interval in the configured timezone |
+| `/reminders quiet off` | Disable quiet hours |
+| `/reminders followups on` | Opt into follow-ups for future deliveries |
+| `/reminders followups off` | Disable follow-ups and cancel queued follow-ups |
+
+Quiet hours and follow-ups default off. Quiet hours require different `HH:MM` times and
+defer initial notifications, snoozes and follow-ups until the interval ends. Follow-ups
+are capped at two per occurrence, 60 minutes apart, and five attempts per user per
+local day. Failed send attempts consume the daily budget. Turning follow-ups on does
+not revive old queues; pending occurrences remain available for explicit actions.
 
 ---
 

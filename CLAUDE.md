@@ -137,9 +137,16 @@ src/
   `day_of_week`) so "every Monday 09:00" survives DST changes
 - `nextOccurrence` walks local days and resolves each candidate through
   `instantFromWallClock` rather than adding fixed 24h steps
-- The scheduler polls every 30s; delivery is at-least-once (duplicate beats silence), and
-  a reminder recorded as sent is never sent twice for the same occurrence
-- Reminders missed while offline are delivered flagged `late`
+- The scheduler polls every 30s, atomically materializes an occurrence and advances
+  its series, then leases the occurrence for delivery. Delivery is at-least-once;
+  a crash after Telegram accepts a send can cause a duplicate.
+- Done/Skip/Snooze use owner-scoped, versioned callbacks. Resolving one occurrence
+  does not change its recurring schedule; `/pending` includes sent one-offs.
+- Quiet hours and follow-ups default off. Quiet hours defer all notification kinds.
+  Opt-in follow-ups allow two per occurrence, 60 minutes apart, and five attempts
+  per local day. Turning them off cancels queued follow-ups. `/reminders` manages
+  these preferences; Tomorrow snoozes to 09:00 in `TIMEZONE`.
+- Apply `docs/database-schema.sql` before deploying these reminder features.
 
 **Database Service** ([src/services/database.ts](src/services/database.ts))
 - Singleton Supabase client; uses `SUPABASE_SERVICE_ROLE_KEY` when present
@@ -178,11 +185,12 @@ static strings with no interpolation.
 
 Required Supabase tables (full DDL in [docs/database-schema.sql](docs/database-schema.sql)):
 `user_data`, `command_history`, `tasks`, `prompts`, `conversations`, `facts`,
-`reminders`, `pending_actions`, `credentials`, `health_probes`, `token_usage`. Readiness
+`reminders`, `reminder_occurrences`, `reminder_preferences`,
+`reminder_followup_daily_usage`, `pending_actions`, `credentials`, `health_probes`, `token_usage`. Readiness
 queries all of them, so a missing table makes `/ready` report `unhealthy`. `/health`
 never queries the database; both dependency probes have three-second deadlines.
 
-All eleven tables have Row Level Security enabled with service-role access and
+All fourteen tables have Row Level Security enabled with service-role access and
 anonymous/authenticated API grants revoked. **The
 bot must run with `SUPABASE_SERVICE_ROLE_KEY`**; never ship that key to a client.
 

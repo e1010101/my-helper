@@ -6,6 +6,7 @@ import { PGlite } from '@electric-sql/pglite';
 const privateTables = [
   'user_data', 'command_history', 'tasks', 'prompts', 'conversations', 'facts',
   'reminders', 'pending_actions', 'credentials', 'health_probes', 'token_usage',
+  'reminder_occurrences', 'reminder_preferences', 'reminder_followup_daily_usage',
 ];
 
 test('the real schema is repeatable and restricts every private table to the service role', async () => {
@@ -19,10 +20,26 @@ test('the real schema is repeatable and restricts every private table to the ser
       GRANT USAGE ON SCHEMA public TO anon, authenticated;
       ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated;
       ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO anon, authenticated;
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO anon, authenticated;
     `);
     const schema = await readFile(new URL('../docs/database-schema.sql', import.meta.url), 'utf8');
     await pg.exec(schema);
     await pg.exec(schema);
+
+    const functions = await pg.query<{ proname: string; anon_execute: boolean; authenticated_execute: boolean; service_execute: boolean; public_execute: boolean; security_definer: boolean }>(`
+      SELECT proname, has_function_privilege('anon', oid, 'EXECUTE') AS anon_execute,
+        has_function_privilege('authenticated', oid, 'EXECUTE') AS authenticated_execute,
+        has_function_privilege('service_role', oid, 'EXECUTE') AS service_execute,
+        EXISTS (SELECT 1 FROM aclexplode(proacl) WHERE grantee = 0 AND privilege_type = 'EXECUTE') AS public_execute,
+        prosecdef AS security_definer
+      FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname IN (
+        'materialize_reminder_occurrence','claim_reminder_occurrence','act_on_reminder_occurrence',
+        'finish_reminder_occurrence','defer_reminder_occurrence','cancel_reminder_occurrences',
+        'update_reminder_preferences','reserve_reminder_follow_up')`);
+    assert.equal(functions.rows.length, 8);
+    for (const { proname, ...grants } of functions.rows) {
+      assert.deepEqual(grants, { anon_execute: false, authenticated_execute: false, service_execute: true, public_execute: false, security_definer: false }, proname);
+    }
 
     const rls = await pg.query<{ relname: string; relrowsecurity: boolean }>(
       "SELECT relname, relrowsecurity FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind = 'r'",
@@ -51,6 +68,7 @@ test('the real schema is repeatable and restricts every private table to the ser
       for (const table of privateTables) {
         await assert.rejects(pg.query(`SELECT * FROM ${table}`), /permission denied/, `${role} must not read ${table}`);
       }
+      await assert.rejects(pg.query("SELECT reserve_reminder_follow_up(1, '2026-10-27', 5)"), /permission denied/);
       await assert.rejects(pg.query("INSERT INTO prompts (user_id,title,prompt,image_file_id) VALUES (1,'x','x','x')"), /permission denied/);
       await pg.exec('RESET ROLE');
     }

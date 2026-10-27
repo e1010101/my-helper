@@ -11,13 +11,14 @@ import type {
   TokenUsageRecord,
   TokenUsageSummary,
 } from '../types/assistant.js';
+import type { ReminderActionStore } from './reminder-action-store.js';
 
 /**
  * Everything the assistant needs to persist. The interface exists so the
  * scheduler, tool registry and AI loop can be exercised in tests against an
  * in-memory implementation instead of a live database.
  */
-export interface AssistantStore {
+export interface AssistantStore extends ReminderActionStore {
   // --- Conversation memory ---
   appendMessages(messages: NewConversationMessage[]): Promise<void>;
   /** Most recent messages, returned oldest-first and capped at `limit`. */
@@ -44,7 +45,7 @@ export interface AssistantStore {
   /** Edits an active reminder owned by the user; null means it no longer exists. */
   updateReminder(id: number, userId: number, update: ReminderUpdate): Promise<Reminder | null>;
   /** Reminders whose next run is at or before `now`, oldest first. */
-  listDueReminders(now: Date, limit?: number): Promise<Reminder[]>;
+  listDueReminders(now: Date, limit?: number, userId?: number): Promise<Reminder[]>;
   /**
    * Records a delivery only if the scheduled occurrence still matches the
    * snapshot that was delivered. Text-only edits do not invalidate it.

@@ -35,7 +35,7 @@ test('delivers a one-off reminder that is due and deactivates it', async () => {
   const delivered = await scheduler.tick();
 
   assert.equal(delivered.length, 1);
-  assert.equal(deliveries[0].reminder.text, 'Take the bins out');
+  assert.equal(deliveries[0].occurrence.text, 'Take the bins out');
   assert.equal(deliveries[0].late, false, 'one minute late is within the threshold');
 
   const remaining = await store.listReminders(1);
@@ -138,11 +138,11 @@ test('one failing delivery does not stop the others', async () => {
     store,
     timezone: SINGAPORE,
     clock: fixedClock(now.toISOString()),
-    deliver: async ({ reminder }) => {
-      if (reminder.text === 'First') {
+    deliver: async ({ occurrence }) => {
+      if (occurrence.text === 'First') {
         throw new Error('telegram exploded');
       }
-      seen.push(reminder.text);
+      seen.push(occurrence.text);
     },
   });
 
@@ -230,8 +230,8 @@ test('housekeeping runs once per poll and never breaks delivery', async () => {
     store,
     timezone: SINGAPORE,
     clock: fixedClock(now.toISOString()),
-    deliver: async ({ reminder }) => {
-      delivered.push(reminder.text);
+    deliver: async ({ occurrence }) => {
+      delivered.push(occurrence.text);
     },
     onPoll: () => {
       polls += 1;
@@ -284,23 +284,28 @@ test('reminder times are timezone-correct end to end', async () => {
   assert.equal(delivered, 1);
 });
 
-test('delivery of an old one-off occurrence cannot deactivate a newly recurring schedule', async () => {
+test('materializing an old one-off snapshot cannot deactivate a newly recurring schedule', async () => {
   const store = new InMemoryAssistantStore();
   const reminder = await store.createReminder({ userId: 1, text: 'Old', frequency: 'once', nextRunAt: '2026-03-10T01:00:00Z' });
+  const materialize = store.materializeReminder.bind(store);
+  store.materializeReminder = async (expected, nextRunAt, now) => {
+    await store.updateReminder(reminder.id, 1, {
+      text: 'New recurring reminder',
+      schedule: { frequency: 'daily', timeOfDay: '21:00', nextRunAt: '2026-03-10T13:00:00Z' },
+    });
+    return materialize(expected, nextRunAt, now);
+  };
+  let deliveries = 0;
   const scheduler = new ReminderScheduler({
     store, timezone: SINGAPORE, clock: fixedClock('2026-03-10T01:00:00Z'),
-    deliver: async () => {
-      await store.updateReminder(reminder.id, 1, {
-        text: 'New recurring reminder',
-        schedule: { frequency: 'daily', timeOfDay: '21:00', nextRunAt: '2026-03-10T13:00:00Z' },
-      });
-    },
+    deliver: async () => { deliveries += 1; },
   });
   await scheduler.tick();
   const saved = await store.getReminder(reminder.id, 1);
   assert.equal(saved?.active, true);
   assert.equal(saved?.frequency, 'daily');
   assert.equal(saved?.nextRunAt, '2026-03-10T13:00:00Z');
+  assert.equal(deliveries, 0, 'the obsolete snapshot must not become a notification');
 });
 
 test('recurring delivery cannot overwrite a concurrent schedule edit', async () => {
@@ -350,6 +355,6 @@ test('cancelling during delivery does not let the stale occurrence alter the can
   await scheduler.tick();
   const [saved] = await store.listReminders(1, true);
   assert.equal(saved.active, false);
-  assert.equal(saved.nextRunAt, '2026-03-10T01:00:00Z');
+  assert.equal(saved.nextRunAt, '2026-03-11T01:00:00.000Z', 'materialization advances the series before delivery');
   assert.equal(saved.lastSentAt, null);
 });

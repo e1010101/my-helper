@@ -43,6 +43,16 @@ export const COMMANDS: CommandDefinition[] = [
     ],
   },
   { name: 'tasks', description: 'List todos and active reminders' },
+  { name: 'pending', description: 'Act on pending reminders: Done, Snooze or Skip' },
+  {
+    name: 'reminders',
+    description: 'Quiet hours and opt-in reminder follow-ups',
+    usage: [
+      '  quiet HH:MM HH:MM : Set quiet hours (overnight supported)',
+      '  quiet off : Disable quiet hours',
+      '  followups on|off : Enable or disable follow-ups',
+    ],
+  },
   { name: 'prompt', description: 'Save a prompt template' },
   {
     name: 'getprompt',

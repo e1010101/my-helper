@@ -23,6 +23,7 @@ process.env.ADMIN_USER_ID = '4242';
 
 const { registerCommands } = await import('../src/commands/index.js');
 const { registerAssistantCommands } = await import('../src/commands/assistant-commands.js');
+const { registerActionableReminderCommands } = await import('../src/commands/actionable-reminders.js');
 const { AssistantService } = await import('../src/services/assistant.js');
 const { InMemoryAssistantStore } = await import('../src/services/in-memory-assistant-store.js');
 
@@ -53,6 +54,7 @@ function registeredNames(): Set<string> {
 
   registerCommands(fakeBot as never, { getStore: () => assistant.getStore(), timezone: 'UTC' });
   registerAssistantCommands(fakeBot as never, assistant, 'UTC');
+  registerActionableReminderCommands(fakeBot as never, { getStore: () => store, timezone: 'UTC' });
   return names;
 }
 

@@ -119,8 +119,10 @@ export class HealthService {
       // Readiness validates every required table, then checks writability.
       const checks = await Promise.all([
         db.getClient().from('user_data').select('user_id').limit(1).abortSignal(signal),
+        db.getClient().from('reminder_preferences').select('user_id').limit(1).abortSignal(signal),
+        db.getClient().from('reminder_followup_daily_usage').select('user_id').limit(1).abortSignal(signal),
         ...['command_history', 'tasks', 'prompts', 'conversations', 'facts',
-          'reminders', 'pending_actions', 'credentials', 'health_probes', 'token_usage']
+          'reminders', 'reminder_occurrences', 'pending_actions', 'credentials', 'health_probes', 'token_usage']
           .map((table) => db.getClient().from(table).select('id').limit(1).abortSignal(signal)),
       ]);
 

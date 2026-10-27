@@ -239,6 +239,196 @@ COMMENT ON TABLE token_usage IS 'Per-call token accounting, for watching prompt 
 CREATE INDEX IF NOT EXISTS idx_token_usage_user_created ON token_usage(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_token_usage_user_id_cursor ON token_usage(user_id, id);
 
+-- Each due date is a separate actionable item. The series advances when an
+-- occurrence is materialized, while earlier occurrences remain actionable.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reminders_id_owner ON reminders(id, user_id);
+CREATE TABLE IF NOT EXISTS reminder_occurrences (
+  id BIGSERIAL PRIMARY KEY,
+  reminder_id BIGINT NOT NULL,
+  user_id BIGINT NOT NULL,
+  text TEXT NOT NULL,
+  scheduled_for TIMESTAMPTZ NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','done','skipped','cancelled')),
+  next_notification_at TIMESTAMPTZ,
+  notification_kind TEXT NOT NULL DEFAULT 'initial' CHECK (notification_kind IN ('initial','snooze','followup')),
+  last_notified_at TIMESTAMPTZ,
+  notification_count INTEGER NOT NULL DEFAULT 0 CHECK (notification_count >= 0),
+  follow_up_count INTEGER NOT NULL DEFAULT 0 CHECK (follow_up_count BETWEEN 0 AND 2),
+  completed_at TIMESTAMPTZ,
+  version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
+  lease_token TEXT,
+  lease_until TIMESTAMPTZ,
+  FOREIGN KEY (reminder_id, user_id) REFERENCES reminders(id, user_id) ON DELETE CASCADE,
+  UNIQUE (reminder_id, scheduled_for),
+  CHECK ((lease_token IS NULL) = (lease_until IS NULL)),
+  CHECK (status = 'pending' OR (next_notification_at IS NULL AND lease_token IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_reminder_occurrences_due ON reminder_occurrences(next_notification_at) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_reminder_occurrences_owner ON reminder_occurrences(user_id, scheduled_for) WHERE status = 'pending';
+
+CREATE TABLE IF NOT EXISTS reminder_preferences (
+  user_id BIGINT PRIMARY KEY CHECK (user_id > 0),
+  quiet_hours_start TEXT,
+  quiet_hours_end TEXT,
+  follow_ups_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  CHECK ((quiet_hours_start IS NULL AND quiet_hours_end IS NULL) OR
+    (quiet_hours_start IS NOT NULL AND quiet_hours_end IS NOT NULL
+      AND quiet_hours_start ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+      AND quiet_hours_end ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+      AND quiet_hours_start <> quiet_hours_end))
+);
+CREATE TABLE IF NOT EXISTS reminder_followup_daily_usage (
+  user_id BIGINT NOT NULL CHECK (user_id > 0),
+  local_date DATE NOT NULL,
+  attempts INTEGER NOT NULL CHECK (attempts BETWEEN 1 AND 5),
+  PRIMARY KEY (user_id, local_date)
+);
+
+-- All functions are invoker-rights and granted only to service_role below.
+-- The series lock serializes materialization and cancellation. Schedule CAS
+-- prevents a previously read due row from undoing a user's schedule edit.
+CREATE OR REPLACE FUNCTION materialize_reminder_occurrence(
+  p_reminder_id BIGINT, p_user_id BIGINT, p_expected_next_run_at TIMESTAMPTZ,
+  p_expected_frequency TEXT, p_expected_time_of_day TEXT,
+  p_expected_day_of_week INTEGER, p_expected_day_of_month INTEGER,
+  p_next_run_at TIMESTAMPTZ, p_now TIMESTAMPTZ
+) RETURNS SETOF reminder_occurrences LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE series reminders%ROWTYPE; occurrence reminder_occurrences%ROWTYPE;
+BEGIN
+  IF p_now IS NULL OR (p_next_run_at IS NOT NULL AND p_next_run_at <= p_now) THEN
+    RAISE EXCEPTION 'Reminder time must be in the future';
+  END IF;
+  SELECT * INTO series FROM reminders WHERE id = p_reminder_id AND user_id = p_user_id AND active
+    AND next_run_at = p_expected_next_run_at AND next_run_at <= p_now
+    AND frequency = p_expected_frequency
+    AND time_of_day IS NOT DISTINCT FROM p_expected_time_of_day
+    AND day_of_week IS NOT DISTINCT FROM p_expected_day_of_week
+    AND day_of_month IS NOT DISTINCT FROM p_expected_day_of_month FOR UPDATE;
+  IF NOT FOUND THEN RETURN; END IF;
+  IF series.frequency = 'once' AND p_next_run_at IS NOT NULL THEN RAISE EXCEPTION 'One-off reminders cannot recur'; END IF;
+  INSERT INTO reminder_occurrences(reminder_id,user_id,text,scheduled_for,next_notification_at)
+    VALUES(series.id,series.user_id,series.text,series.next_run_at,series.next_run_at)
+    ON CONFLICT (reminder_id,scheduled_for) DO NOTHING RETURNING * INTO occurrence;
+  IF NOT FOUND THEN RETURN; END IF;
+  UPDATE reminders SET active = p_next_run_at IS NOT NULL, next_run_at = COALESCE(p_next_run_at,next_run_at) WHERE id = series.id;
+  RETURN NEXT occurrence;
+END $$;
+
+CREATE OR REPLACE FUNCTION claim_reminder_occurrence(
+  p_id BIGINT, p_version INTEGER, p_now TIMESTAMPTZ, p_lease_until TIMESTAMPTZ, p_token TEXT
+) RETURNS SETOF reminder_occurrences LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+BEGIN
+  IF p_now IS NULL OR p_lease_until IS NULL OR p_lease_until <= p_now OR p_token IS NULL OR p_token = '' THEN
+    RAISE EXCEPTION 'A delivery lease requires a future expiry and token';
+  END IF;
+  RETURN QUERY UPDATE reminder_occurrences SET lease_token = p_token, lease_until = p_lease_until
+    WHERE id = p_id AND version = p_version AND status = 'pending' AND next_notification_at <= p_now
+      AND (lease_until IS NULL OR lease_until <= p_now)
+      AND (notification_kind <> 'followup' OR follow_up_count < 2)
+    RETURNING *;
+END $$;
+
+CREATE OR REPLACE FUNCTION act_on_reminder_occurrence(
+  p_id BIGINT, p_user_id BIGINT, p_version INTEGER, p_action TEXT, p_now TIMESTAMPTZ, p_snooze_until TIMESTAMPTZ
+) RETURNS SETOF reminder_occurrences LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+BEGIN
+  IF p_now IS NULL OR p_action IS NULL OR p_action NOT IN ('done','skip','snooze') THEN RAISE EXCEPTION 'Invalid reminder action'; END IF;
+  IF p_action = 'snooze' AND (p_snooze_until IS NULL OR p_snooze_until <= p_now) THEN RAISE EXCEPTION 'Snooze must be in the future'; END IF;
+  RETURN QUERY UPDATE reminder_occurrences SET
+    status = CASE p_action WHEN 'done' THEN 'done' WHEN 'skip' THEN 'skipped' ELSE 'pending' END,
+    next_notification_at = CASE WHEN p_action = 'snooze' THEN p_snooze_until ELSE NULL END,
+    notification_kind = CASE WHEN p_action = 'snooze' THEN 'snooze' ELSE notification_kind END,
+    completed_at = CASE WHEN p_action = 'snooze' THEN NULL ELSE p_now END,
+    version = version + 1, lease_token = NULL, lease_until = NULL
+    WHERE id = p_id AND user_id = p_user_id AND version = p_version AND status = 'pending' RETURNING *;
+END $$;
+
+CREATE OR REPLACE FUNCTION finish_reminder_occurrence(
+  p_id BIGINT, p_version INTEGER, p_token TEXT, p_sent_at TIMESTAMPTZ, p_next_notification_at TIMESTAMPTZ
+) RETURNS BOOLEAN LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE item reminder_occurrences%ROWTYPE; enabled BOOLEAN;
+BEGIN
+  IF p_sent_at IS NULL OR (p_next_notification_at IS NOT NULL AND p_next_notification_at <= p_sent_at) THEN RAISE EXCEPTION 'Follow-up must be in the future'; END IF;
+  SELECT * INTO item FROM reminder_occurrences WHERE id = p_id;
+  IF NOT FOUND THEN RETURN FALSE; END IF;
+  -- Keep lock order series -> preferences -> occurrence. This avoids deadlocks
+  -- with cancellation and makes opting out win over an in-flight send.
+  PERFORM 1 FROM reminders WHERE id = item.reminder_id FOR UPDATE;
+  INSERT INTO reminder_preferences(user_id) VALUES(item.user_id) ON CONFLICT DO NOTHING;
+  SELECT follow_ups_enabled INTO enabled FROM reminder_preferences WHERE user_id = item.user_id FOR UPDATE;
+  UPDATE reminder_occurrences SET last_notified_at = p_sent_at,
+    notification_count = notification_count + 1,
+    follow_up_count = follow_up_count + CASE WHEN notification_kind = 'followup' THEN 1 ELSE 0 END,
+    next_notification_at = CASE WHEN enabled AND (follow_up_count + CASE WHEN notification_kind = 'followup' THEN 1 ELSE 0 END) < 2 THEN p_next_notification_at ELSE NULL END,
+    notification_kind = 'followup', lease_token = NULL, lease_until = NULL
+    WHERE id = p_id AND version = p_version AND lease_token = p_token AND status = 'pending';
+  IF NOT FOUND THEN RETURN FALSE; END IF;
+  UPDATE reminders SET last_sent_at = GREATEST(last_sent_at,p_sent_at) WHERE id = item.reminder_id;
+  RETURN TRUE;
+END $$;
+
+CREATE OR REPLACE FUNCTION defer_reminder_occurrence(p_id BIGINT, p_version INTEGER, p_token TEXT, p_until TIMESTAMPTZ)
+RETURNS BOOLEAN LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE owner_id BIGINT; enabled BOOLEAN;
+BEGIN
+  SELECT user_id INTO owner_id FROM reminder_occurrences WHERE id = p_id;
+  IF NOT FOUND THEN RETURN FALSE; END IF;
+  INSERT INTO reminder_preferences(user_id) VALUES(owner_id) ON CONFLICT DO NOTHING;
+  SELECT follow_ups_enabled INTO enabled FROM reminder_preferences WHERE user_id = owner_id FOR UPDATE;
+  UPDATE reminder_occurrences SET next_notification_at = CASE WHEN notification_kind = 'followup' AND NOT enabled THEN NULL ELSE p_until END,
+    lease_token = NULL, lease_until = NULL
+    WHERE id = p_id AND version = p_version AND lease_token = p_token AND status = 'pending';
+  RETURN FOUND;
+END $$;
+
+CREATE OR REPLACE FUNCTION cancel_reminder_occurrences(p_reminder_id BIGINT, p_user_id BIGINT)
+RETURNS BOOLEAN LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE was_active BOOLEAN; changed BOOLEAN;
+BEGIN
+  SELECT active INTO was_active FROM reminders WHERE id = p_reminder_id AND user_id = p_user_id FOR UPDATE;
+  IF NOT FOUND THEN RETURN FALSE; END IF;
+  UPDATE reminders SET active = FALSE WHERE id = p_reminder_id;
+  UPDATE reminder_occurrences SET status = 'cancelled', next_notification_at = NULL,
+    version = version + 1, lease_token = NULL, lease_until = NULL
+    WHERE reminder_id = p_reminder_id AND user_id = p_user_id AND status = 'pending';
+  changed := FOUND;
+  RETURN was_active OR changed;
+END $$;
+
+CREATE OR REPLACE FUNCTION update_reminder_preferences(p_user_id BIGINT, p_patch JSONB)
+RETURNS SETOF reminder_preferences LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE prefs reminder_preferences%ROWTYPE;
+BEGIN
+  IF p_patch IS NULL OR jsonb_typeof(p_patch) <> 'object'
+    OR p_patch - ARRAY['quiet_hours_start','quiet_hours_end','follow_ups_enabled'] <> '{}'::jsonb
+    OR (p_patch ? 'follow_ups_enabled' AND jsonb_typeof(p_patch->'follow_ups_enabled') <> 'boolean')
+    OR (p_patch ? 'quiet_hours_start' AND jsonb_typeof(p_patch->'quiet_hours_start') NOT IN ('string','null'))
+    OR (p_patch ? 'quiet_hours_end' AND jsonb_typeof(p_patch->'quiet_hours_end') NOT IN ('string','null'))
+  THEN RAISE EXCEPTION 'Invalid reminder preferences'; END IF;
+  INSERT INTO reminder_preferences(user_id) VALUES(p_user_id) ON CONFLICT DO NOTHING;
+  SELECT * INTO prefs FROM reminder_preferences WHERE user_id = p_user_id FOR UPDATE;
+  UPDATE reminder_preferences SET
+    quiet_hours_start = CASE WHEN p_patch ? 'quiet_hours_start' THEN p_patch->>'quiet_hours_start' ELSE quiet_hours_start END,
+    quiet_hours_end = CASE WHEN p_patch ? 'quiet_hours_end' THEN p_patch->>'quiet_hours_end' ELSE quiet_hours_end END,
+    follow_ups_enabled = CASE WHEN p_patch ? 'follow_ups_enabled' THEN (p_patch->>'follow_ups_enabled')::boolean ELSE follow_ups_enabled END
+    WHERE user_id = p_user_id RETURNING * INTO prefs;
+  IF NOT prefs.follow_ups_enabled THEN
+    UPDATE reminder_occurrences SET next_notification_at = NULL, lease_token = NULL, lease_until = NULL
+      WHERE user_id = p_user_id AND status = 'pending' AND notification_kind = 'followup';
+  END IF;
+  RETURN NEXT prefs;
+END $$;
+
+CREATE OR REPLACE FUNCTION reserve_reminder_follow_up(p_user_id BIGINT, p_local_date DATE, p_maximum INTEGER)
+RETURNS BOOLEAN LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+BEGIN
+  IF p_maximum IS NULL OR p_maximum NOT BETWEEN 1 AND 5 THEN RAISE EXCEPTION 'Follow-up maximum must be between 1 and 5'; END IF;
+  INSERT INTO reminder_followup_daily_usage(user_id,local_date,attempts) VALUES(p_user_id,p_local_date,1)
+    ON CONFLICT (user_id,local_date) DO UPDATE SET attempts = reminder_followup_daily_usage.attempts + 1
+      WHERE reminder_followup_daily_usage.attempts < p_maximum;
+  RETURN FOUND;
+END $$;
+
 -- ============================================================
 -- Row Level Security
 -- ============================================================
@@ -258,6 +448,9 @@ ALTER TABLE pending_actions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE credentials ENABLE ROW LEVEL SECURITY;
 ALTER TABLE health_probes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE token_usage ENABLE ROW LEVEL SECURITY;
+ALTER TABLE reminder_occurrences ENABLE ROW LEVEL SECURITY;
+ALTER TABLE reminder_preferences ENABLE ROW LEVEL SECURITY;
+ALTER TABLE reminder_followup_daily_usage ENABLE ROW LEVEL SECURITY;
 
 DO $$
 DECLARE
@@ -276,7 +469,7 @@ BEGIN
 
   GRANT USAGE ON SCHEMA public TO service_role;
 
-  FOREACH target IN ARRAY ARRAY['user_data', 'command_history', 'tasks', 'prompts', 'conversations', 'facts', 'reminders', 'pending_actions', 'credentials', 'health_probes', 'token_usage']
+  FOREACH target IN ARRAY ARRAY['user_data', 'command_history', 'tasks', 'prompts', 'conversations', 'facts', 'reminders', 'pending_actions', 'credentials', 'health_probes', 'token_usage', 'reminder_occurrences', 'reminder_preferences', 'reminder_followup_daily_usage']
   LOOP
     -- The bot enforces Telegram ownership with a server-only service key.
     -- Remove legacy API grants as well as enabling RLS so an old permissive
@@ -288,7 +481,7 @@ BEGIN
     END LOOP;
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO service_role', target);
 
-    sequence_name := CASE WHEN target = 'user_data' THEN NULL ELSE pg_get_serial_sequence(format('public.%I', target), 'id') END;
+    sequence_name := CASE WHEN target IN ('user_data','reminder_preferences','reminder_followup_daily_usage') THEN NULL ELSE pg_get_serial_sequence(format('public.%I', target), 'id') END;
     IF sequence_name IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON SEQUENCE %s FROM PUBLIC', sequence_name);
       FOR client_role IN SELECT rolname FROM pg_roles WHERE rolname IN ('anon', 'authenticated')
@@ -307,6 +500,26 @@ BEGIN
     EXCEPTION WHEN duplicate_object THEN
       NULL;
     END;
+  END LOOP;
+END $$;
+
+-- Functions default to PUBLIC execution in PostgreSQL; revoke that even on
+-- non-Supabase installations and remove inherited API-role grants on upgrades.
+DO $$
+DECLARE target REGPROCEDURE; client_role TEXT;
+BEGIN
+  FOR target IN SELECT oid::regprocedure FROM pg_proc WHERE pronamespace = 'public'::regnamespace
+    AND proname IN ('materialize_reminder_occurrence','claim_reminder_occurrence','act_on_reminder_occurrence',
+      'finish_reminder_occurrence','defer_reminder_occurrence','cancel_reminder_occurrences',
+      'update_reminder_preferences','reserve_reminder_follow_up')
+  LOOP
+    EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC',target);
+    FOR client_role IN SELECT rolname FROM pg_roles WHERE rolname IN ('anon','authenticated') LOOP
+      EXECUTE format('REVOKE ALL ON FUNCTION %s FROM %I',target,client_role);
+    END LOOP;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO service_role',target);
+    END IF;
   END LOOP;
 END $$;
 

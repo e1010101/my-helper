@@ -315,7 +315,7 @@ async function tasksCommand(ctx: Context, options: TaskCommandOptions) {
 
   if (tasksResult.status === 'fulfilled' && remindersResult.status === 'fulfilled'
     && tasksResult.value.length === 0 && remindersResult.value.length === 0) {
-    await ctx.reply('📝 You have no todos or active reminders yet. Use /task -create to create a todo, or ask me to set a reminder.');
+    await ctx.reply('📝 You have no todos or active reminders yet. Use /task -create to create a todo, or ask me to set a reminder.\n\nOpen /pending for reminders waiting for Done, Snooze or Skip, including delivered one-off reminders.');
     return;
   }
 
@@ -344,6 +344,7 @@ async function tasksCommand(ctx: Context, options: TaskCommandOptions) {
     console.error('Tasks reminder list error:', remindersResult.reason);
     await ctx.reply('❌ Failed to fetch active reminders. Please try again later.');
   }
+  await ctx.reply('Open /pending for reminders waiting for Done, Snooze or Skip. Configure quiet hours and opt-in follow-ups with /reminders.');
 }
 
 async function taskActionCommand(ctx: Context) {
